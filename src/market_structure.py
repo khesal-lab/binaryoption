@@ -210,9 +210,39 @@ class MarketStructureTracker:
             for c in candles_list
         ]
 
+    def _swing_range(self) -> Optional[float]:
+        """
+        محدودهٔ (Range) سوئینگ فعلی: فاصلهٔ بین آخرین سوئینگ های و آخرین سوئینگ لو
+        شناسایی‌شده — معیار «بزرگی» ساختار نوسانی جاری که همه‌چیز دیگر (اندازهٔ
+        کندل، اندازهٔ لگ) نسبت به آن سنجیده می‌شود.
+        """
+        last_high = self._last_swings_by_kind("high", 1)
+        last_low = self._last_swings_by_kind("low", 1)
+        if not last_high or not last_low:
+            return None
+        rng = abs(last_high[-1].price - last_low[-1].price)
+        return rng if rng > 0 else None
+
     # -- خروجی اصلی: ویژگی‌های ساختاری در لحظه --------------------------------
-    def get_features(self, current_price: float, current_time: float) -> dict:
+    def get_features(
+        self,
+        current_price: float,
+        current_time: float,
+        current_candle_range: Optional[float] = None,
+    ) -> dict:
         features: dict = {}
+
+        # --- آیا اصلاً سوئینگی شناسایی شده؟ (پیش‌نیاز همهٔ ویژگی‌های زیر) ---
+        features["has_swing_data"] = int(bool(self.swing_points))
+        swing_range = self._swing_range()
+        features["swing_range_defined"] = int(swing_range is not None)
+
+        # نسبت محدودهٔ کندل جاری به محدودهٔ سوئینگ: این کندل چه سهمی از کل نوسان دارد
+        features["candle_range_to_swing_range_ratio"] = (
+            current_candle_range / swing_range
+            if (current_candle_range is not None and swing_range)
+            else None
+        )
 
         atr_short = self._atr(self.atr_period_short)
         atr_long = self._atr(self.atr_period_long)
@@ -256,8 +286,18 @@ class MarketStructureTracker:
         current_leg = self._current_leg(current_price)
         if current_leg:
             features["leg_direction"] = 1 if current_leg.direction == "up" else -1
-            features["leg_length_seconds"] = current_time - current_leg.start_time
+            # طول لگ برحسب «تعداد کندل» به‌جای ثانیهٔ خام، تا مستقل از تایم‌فریم/سرعت اجرا باشد
+            features["leg_length_in_candles"] = (
+                (current_time - current_leg.start_time) / config.CANDLE_TIMEFRAME_SECONDS
+                if config.CANDLE_TIMEFRAME_SECONDS
+                else None
+            )
             leg_range = current_leg.range(current_price)
+
+            # نسبت محدودهٔ لگ فعلی به محدودهٔ سوئینگ (آیا این لگ نسبت به کل نوسان بزرگ است یا کوچک)
+            features["leg_range_to_swing_range_ratio"] = (
+                leg_range / swing_range if swing_range else None
+            )
 
             # نسبت طول لگ فعلی به میانگین چند لگ قبلی (آیا لگ فعلی کشیده‌تر از حد معمول است)
             all_swings_sorted = sorted(self.swing_points, key=lambda p: p.timestamp)
@@ -284,7 +324,8 @@ class MarketStructureTracker:
                 features["fib_retracement_of_prev_leg"] = None
         else:
             features["leg_direction"] = None
-            features["leg_length_seconds"] = None
+            features["leg_length_in_candles"] = None
+            features["leg_range_to_swing_range_ratio"] = None
             features["leg_extension_ratio"] = None
             features["fib_retracement_of_prev_leg"] = None
 

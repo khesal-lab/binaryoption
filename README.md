@@ -74,7 +74,9 @@ data/                         خروجی‌های تولیدشده (CSV، SQLite
 | نوسان | `volatility_ratio_short_long` (انبساط/انقباض نوسان: ATR کوتاه به ATR بلند) |
 | شکست ساختار | `broke_prev_candle_high/low`, `broke_recent_swing_high/low` |
 | حمایت/مقاومت | `dist_to_resistance_atr`, `dist_to_support_atr` (فاصله نرمال‌شده با ATR) |
-| لگ (Leg) | `leg_direction`, `leg_length_seconds`, `leg_extension_ratio`, `fib_retracement_of_prev_leg` |
+| وجود سوئینگ | `has_swing_data`, `swing_range_defined` (پیش‌نیاز ویژگی‌های زیر؛ در ابتدای اجرا ۰ است) |
+| کندل نسبت به سوئینگ | `candle_range_to_swing_range_ratio` (محدودهٔ کندل جاری چه سهمی از کل محدودهٔ سوئینگ دارد) |
+| لگ (Leg) | `leg_direction`, `leg_length_in_candles` (طول لگ برحسب تعداد کندل، نه ثانیه خام)، `leg_range_to_swing_range_ratio` (محدودهٔ لگ فعلی نسبت به محدودهٔ کل سوئینگ)، `leg_extension_ratio` (نسبت به میانگین چند لگ قبلی)، `fib_retracement_of_prev_leg` |
 | روند | `trend_regime` (۱=صعودی، ۰=رنج، ۱-=نزولی)، `trend_regime_ready` |
 | استریک | `candle_color_streak` |
 | عدم‌تقارن سایه | `wick_asymmetry_current`, `wick_asymmetry_relative` |
@@ -90,7 +92,13 @@ data/                         خروجی‌های تولیدشده (CSV، SQLite
 نکته: چون سوئینگ‌ها فقط با یک کندل تأخیر تأیید می‌شوند (ماهیت ذاتی تشخیص
 سوئینگ)، ستون‌های مرتبط با ساختار (`leg_*`, `dist_to_*`, `trend_regime`) در
 اولین دقایق اجرای اسکریپت مقدار `None`/غیرقابل‌اتکا خواهند داشت تا سوئینگ کافی
-جمع شود؛ از ستون `trend_regime_ready` برای فیلتر کردن ردیف‌های ناقص استفاده کنید.
+جمع شود؛ از ستون‌های `has_swing_data` و `trend_regime_ready` برای فیلتر کردن
+ردیف‌های ناقص استفاده کنید.
+
+تنها دو ستون در کل دیتاست مقدار خام قیمت دارند: **`meta_entry_price`** و
+**`meta_exit_price`** (فقط برای محاسبهٔ داخلی نتیجه و ردیابی/دیباگ). سایر
+ستون‌های `meta_*` (`meta_symbol`, `meta_entry_timestamp`, `meta_exit_timestamp`)
+قیمت نیستند، فقط زمان/نماد برای ردیابی‌اند.
 
 ## محدودیت‌ها و هشدارها
 

@@ -100,7 +100,10 @@ class DataLogger:
             return
 
         snapshot = build_feature_snapshot(self.tick_buffer, self.tick_history, self.candle_aggregator)
-        snapshot.update(self.market_structure.get_features(latest.price, latest.timestamp))
+        current_candle_range = self.candle_aggregator.current.range if self.candle_aggregator.current else None
+        snapshot.update(
+            self.market_structure.get_features(latest.price, latest.timestamp, current_candle_range)
+        )
         snapshot.update(self.trade_history.as_feature_dict())
         snapshot["direction"] = direction
 
