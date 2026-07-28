@@ -289,12 +289,38 @@ class DataLogger:
 
     # -- ذخیره‌سازی -------------------------------------------------------------
     def _append_row(self, row: dict) -> None:
-        """یک ردیف را هم به CSV و هم به SQLite اضافه می‌کند."""
+        """
+        یک ردیف را هم به CSV و هم به SQLite اضافه می‌کند. چون این پروژه هنوز در
+        حال توسعه است، ممکن است ستون‌های جدیدی به ویژگی‌ها اضافه شوند در حالی
+        که یک فایل قدیمی‌تر (با ستون‌های کمتر) از قبل روی دیسک هست. برای این‌که
+        این وضعیت خطا ندهد و دیتای قبلی هم از دست نرود، هر دو مقصد را با
+        ستون‌های ناسازگار «هماهنگ» می‌کنیم، نه این‌که صرفاً Append کنیم.
+        """
         df = pd.DataFrame([row])
 
-        # --- CSV ---
-        write_header = not self.csv_path.exists()
-        df.to_csv(self.csv_path, mode="a", header=write_header, index=False)
+        # --- CSV: کل فایل قبلی را می‌خوانیم، ردیف جدید را با اتحاد ستون‌ها
+        # (مقادیر جدید/قدیمی که در دیگری نیست، NaN می‌شود) ترکیب و بازنویسی می‌کنیم.
+        if self.csv_path.exists():
+            existing = pd.read_csv(self.csv_path)
+            combined = pd.concat([existing, df], ignore_index=True)
+        else:
+            combined = df
+        combined.to_csv(self.csv_path, index=False)
 
-        # --- SQLite ---
+        # --- SQLite: اگر جدول از قبل با ستون‌های کمتر ساخته شده، ستون‌های
+        # جدید را با ALTER TABLE اضافه می‌کنیم تا Insert شکست نخورد.
+        self._sync_sqlite_columns(df.columns)
         df.to_sql("trades", self._conn, if_exists="append", index=False)
+
+    def _sync_sqlite_columns(self, columns) -> None:
+        """جدول trades را در صورت نبودن ستون‌های جدید، با ALTER TABLE به‌روز می‌کند."""
+        cursor = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='trades'"
+        )
+        if cursor.fetchone() is None:
+            return  # جدول هنوز ساخته نشده؛ to_sql با if_exists='append' خودش می‌سازد
+        existing_columns = {info[1] for info in self._conn.execute("PRAGMA table_info(trades)")}
+        for col in columns:
+            if col not in existing_columns:
+                self._conn.execute(f'ALTER TABLE trades ADD COLUMN "{col}"')
+        self._conn.commit()
