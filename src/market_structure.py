@@ -180,34 +180,36 @@ class MarketStructureTracker:
             return 0.0
         return (candle.upper_wick - candle.lower_wick) / total
 
-    def get_normalized_chart_shape(self) -> list[dict]:
+    def get_normalized_chart_shape(self, current_price: float, atr_ref: Optional[float]) -> list[dict]:
         """
-        شکل نرمال‌شدهٔ N کندل اخیر (پیش‌فرض ۲۰ تا) — هر مقدار بین ۰ و ۱ نسبت به
-        بازهٔ های/لوی کل پنجره. اگر قیمت جاری از این بازه فراتر برود (Breakout از
-        محدودهٔ دیداری چارت)، عدد نرمال‌شده می‌تواند بزرگ‌تر از ۱ یا کوچک‌تر از ۰
-        شود — این خودش یک سیگنال معنادار است، پس عمداً Clip نمی‌شود.
+        شکل N کندل اخیر (پیش‌فرض ۲۰ تا) با **لحظهٔ ورود به معامله** (نه یک
+        بازهٔ ثابت دلخواه) به‌عنوان مبدأ صفر: هر مقدار OHLC هر کندل به‌صورت
+        (مقدار - قیمت لحظهٔ ورود) / ATR بیان می‌شود.
+
+        صفر یعنی دقیقاً همان‌جایی که الان ایستاده‌ایم؛ عدد مثبت یعنی بالای
+        قیمت فعلی، منفی یعنی پایین آن — دقیقاً همان‌طور که یک تریدر از «همین
+        لحظه» به شکل چارت نگاه می‌کند، نه از یک قاب مطلق و بی‌ربط به موقعیت خودش.
+        محور زمان هم نسبی است: `t` تعداد کندل قبل از لحظهٔ ورود است (۱- =
+        آخرین کندل تکمیل‌شده، ۲- = کندل قبل از آن و ...).
         """
         candles_list = list(self.candles)[-self.chart_window:]
-        if not candles_list:
-            return []
-        window_high = max(c.high for c in candles_list)
-        window_low = min(c.low for c in candles_list)
-        span = window_high - window_low
-        if span <= 0:
+        if not candles_list or not atr_ref or atr_ref <= 0:
             return []
 
-        def norm(v: float) -> float:
-            return (v - window_low) / span
+        def rel(v: float) -> float:
+            return (v - current_price) / atr_ref
 
+        n = len(candles_list)
         return [
             {
-                "o": norm(c.open),
-                "h": norm(c.high),
-                "l": norm(c.low),
-                "c": norm(c.close),
+                "t": -(n - i),
+                "o": rel(c.open),
+                "h": rel(c.high),
+                "l": rel(c.low),
+                "c": rel(c.close),
                 "bullish": int(c.is_bullish),
             }
-            for c in candles_list
+            for i, c in enumerate(candles_list)
         ]
 
     def _swing_range(self) -> Optional[float]:
@@ -361,7 +363,9 @@ class MarketStructureTracker:
             features["wick_asymmetry_current"] = None
             features["wick_asymmetry_relative"] = None
 
-        # --- شکل نرمال‌شدهٔ چارت (برای یادگیری الگوی بصری توسط مدل) ---
-        features["chart_shape_json"] = json.dumps(self.get_normalized_chart_shape())
+        # --- شکل چارت با مبدأ لحظهٔ ورود (برای یادگیری الگوی بصری «از اینجا که هستم») ---
+        features["chart_shape_json"] = json.dumps(
+            self.get_normalized_chart_shape(current_price, atr_ref)
+        )
 
         return features
