@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import json
 import statistics
 from collections import deque
 from dataclasses import dataclass
@@ -94,6 +95,40 @@ class TickBuffer:
                 pct_change = (ticks[i].price - ticks[i - 1].price) / ticks[i - 1].price
                 velocities.append(pct_change / dt)
         return velocities
+
+    def get_recent_velocities_pct(self) -> list[float]:
+        """
+        دنبالهٔ سرعت درصدی بین هر دو تیک متوالی داخل کل بافر (تا ۹ مقدار برای
+        بافر ۱۰تایی) — نه فقط دو عدد خلاصهٔ سرعت/شتاب، بلکه خودِ توالی، تا مدل
+        بتواند الگوی دقیق شتاب‌گیری/کندشدن و جهت را در چند تیک آخر قبل از
+        معامله ببیند.
+        """
+        return self._velocity_pct_series()
+
+    def get_ticks_since_direction_change(self) -> int:
+        """
+        چند تیک متوالی است که حرکت هم‌جهت بوده (بدون تغییر جهت)؟ عدد بزرگ یعنی
+        یک حرکت یک‌طرفهٔ نسبتاً پایدار در جریان است؛ عدد کوچک یعنی نوسان/تردید
+        اخیر (چند بار جهت عوض شده).
+        """
+        ticks = list(self.buffer)
+        if len(ticks) < 2:
+            return 0
+        directions = []
+        for i in range(1, len(ticks)):
+            diff = ticks[i].price - ticks[i - 1].price
+            if diff != 0:
+                directions.append(1 if diff > 0 else -1)
+        if not directions:
+            return 0
+        last_direction = directions[-1]
+        count = 0
+        for d in reversed(directions):
+            if d == last_direction:
+                count += 1
+            else:
+                break
+        return count
 
     # -- شتاب درصدی (Percentage Acceleration) --------------------------------
     def get_acceleration_pct(self) -> float:
@@ -211,6 +246,90 @@ class TickHistory:
 
         return {"stall_count_in_candle": stall_count, "last_stall_position_in_candle": position}
 
+    def get_edge_behavior_features(
+        self,
+        candle_start_time: float,
+        candle_high: float,
+        candle_low: float,
+        edge_zone_ratio: float = 0.15,
+    ) -> dict:
+        """
+        رفتار قیمت نسبت به لبهٔ بالا/پایین کندل جاری:
+            - چند بار قیمت وارد «منطقهٔ لبه» (پیش‌فرض ۱۵٪ بالایی/پایینی رنج کندل) شده؟
+            - آخرین باری که وارد آن منطقه شد، بعد از آن (نه در طول کل کندل، بلکه
+              دقیقاً بعد از همان لحظه) قیمت فراتر رفت (Extend) یا همان‌جا رد
+              شد/متوقف ماند (Reject/Stall)؟ برای این تشخیص، فقط تیک‌های بعد از
+              لحظهٔ تست را نگاه می‌کنیم — نه های/لوی کل کندل — چون ممکن است
+              های/لوی واقعی کندل خیلی زودتر (مثلاً همان کندل قبل از این تست)
+              رخ داده باشد و به این تست ربطی نداشته باشد.
+            - اندازهٔ جهش فعلی (از آخرین نقطهٔ برگشت تا الان) و جهش قبلی، هر دو
+              نسبت به رنج کندل — برای مقایسهٔ «آیا این جهش از جهش قبلی بزرگ‌تر
+              شده یا کوچک‌تر» (فاصله و مقدار جهش‌های متوالی).
+        """
+        result = {
+            "upper_edge_test_count": 0,
+            "lower_edge_test_count": 0,
+            "upper_edge_last_outcome": None,
+            "lower_edge_last_outcome": None,
+            "last_move_size_ratio": None,
+            "prev_move_size_ratio": None,
+        }
+        candle_range = candle_high - candle_low
+        ticks_in_candle = [t for t in self.buffer if t.timestamp >= candle_start_time]
+        if len(ticks_in_candle) < 3 or candle_range <= 0:
+            return result
+
+        # نقاط اکسترمم محلی (Peak/Trough) به‌همراه اندیسشان در دنبالهٔ تیک‌ها
+        extrema_idx: list[int] = []
+        extrema_price: list[float] = []
+        extrema_kind: list[str] = []
+        prev_direction = None
+        for i in range(1, len(ticks_in_candle)):
+            diff = ticks_in_candle[i].price - ticks_in_candle[i - 1].price
+            if diff == 0:
+                continue
+            direction = 1 if diff > 0 else -1
+            if prev_direction is not None and direction != prev_direction:
+                extrema_idx.append(i - 1)
+                extrema_price.append(ticks_in_candle[i - 1].price)
+                extrema_kind.append("peak" if prev_direction == 1 else "trough")
+            prev_direction = direction
+
+        upper_zone = candle_low + (1 - edge_zone_ratio) * candle_range
+        lower_zone = candle_low + edge_zone_ratio * candle_range
+
+        peak_positions = [
+            (idx, price) for idx, price, kind in zip(extrema_idx, extrema_price, extrema_kind)
+            if kind == "peak" and price >= upper_zone
+        ]
+        trough_positions = [
+            (idx, price) for idx, price, kind in zip(extrema_idx, extrema_price, extrema_kind)
+            if kind == "trough" and price <= lower_zone
+        ]
+
+        result["upper_edge_test_count"] = len(peak_positions)
+        result["lower_edge_test_count"] = len(trough_positions)
+
+        if peak_positions:
+            last_idx, last_price = peak_positions[-1]
+            prices_after = [t.price for t in ticks_in_candle[last_idx + 1:]]
+            extended = bool(prices_after) and max(prices_after) > last_price
+            result["upper_edge_last_outcome"] = int(extended)
+
+        if trough_positions:
+            last_idx, last_price = trough_positions[-1]
+            prices_after = [t.price for t in ticks_in_candle[last_idx + 1:]]
+            extended = bool(prices_after) and min(prices_after) < last_price
+            result["lower_edge_last_outcome"] = int(extended)
+
+        if extrema_price:
+            current_price = ticks_in_candle[-1].price
+            result["last_move_size_ratio"] = abs(current_price - extrema_price[-1]) / candle_range
+            if len(extrema_price) >= 2:
+                result["prev_move_size_ratio"] = abs(extrema_price[-1] - extrema_price[-2]) / candle_range
+
+        return result
+
 
 # ---------------------------------------------------------------------------
 # بخش ۲.۳ — ساخت کندل یک‌دقیقه‌ای و استخراج ویژگی‌های شکلی نسبی آن
@@ -244,12 +363,18 @@ class Candle:
         return min(self.open, self.close) - self.low
 
     @property
-    def body_to_wick_ratio(self) -> float:
-        """نسبت طول بدنه به مجموع سایه‌ها. عدد بزرگ=کندل روند‌دار؛ نزدیک صفر=دوجی."""
-        total_wick = self.upper_wick + self.lower_wick
-        if total_wick <= 0:
-            return float(self.body > 0) * 999.0
-        return self.body / total_wick
+    def body_ratio(self) -> float:
+        """
+        نسبت طول بدنه به کل رنج کندل (بدنه/(های−لو))، همیشه بین ۰ و ۱.
+        وقتی کندل اصلاً سایه ندارد (Marubozu)، این مقدار دقیقاً ۱.۰ می‌شود —
+        بدون نیاز به هیچ عدد قراردادی، چون صورت و مخرج هر دو مقادیر واقعی و
+        محدودند (برخلاف نسبت بدنه/سایه که با سایهٔ صفر بی‌نهایت می‌شد).
+        از آن‌جا که body_ratio + upper_wick_ratio + lower_wick_ratio همیشه
+        دقیقاً برابر ۱ است، این سه عدد با هم شکل کامل کندل را بدون هیچ تکینگی
+        توصیف می‌کنند.
+        """
+        rng = self.range
+        return (self.body / rng) if rng > 0 else 0.0
 
     def as_dict(self, prefix: str) -> dict:
         """
@@ -259,7 +384,7 @@ class Candle:
         rng = self.range
         return {
             f"{prefix}_is_bullish": int(self.is_bullish),
-            f"{prefix}_body_to_wick_ratio": self.body_to_wick_ratio,
+            f"{prefix}_body_ratio": self.body_ratio,
             f"{prefix}_upper_wick_ratio": (self.upper_wick / rng) if rng > 0 else 0.0,
             f"{prefix}_lower_wick_ratio": (self.lower_wick / rng) if rng > 0 else 0.0,
         }
@@ -356,6 +481,10 @@ def build_feature_snapshot(
         "velocity_pct_smoothed": tick_buffer.get_velocity_pct_smoothed(),
         "acceleration_pct_smoothed": tick_buffer.get_acceleration_pct_smoothed(),
         "spike_zscore": tick_history.get_spike_zscore(),
+        # دنبالهٔ کامل سرعت/جهت چند تیک اخیر (نه فقط دو عدد خلاصه) و این‌که چند
+        # تیک متوالی است حرکت هم‌جهت بوده (پایداری حرکت لحظه‌ای قبل از معامله):
+        "recent_tick_velocities_json": json.dumps(tick_buffer.get_recent_velocities_pct()),
+        "ticks_since_direction_change": tick_buffer.get_ticks_since_direction_change(),
     }
 
     current_candle = candle_aggregator.current
@@ -370,6 +499,12 @@ def build_feature_snapshot(
         snapshot.update(current_candle.as_dict("candle_curr"))
         snapshot.update(
             tick_history.get_stall_features(current_candle.start_time, current_candle.high, current_candle.low)
+        )
+        # رفتار قیمت نسبت به لبهٔ بالا/پایین کندل جاری (تست/رد/عبور) و اندازهٔ جهش‌ها:
+        snapshot.update(
+            tick_history.get_edge_behavior_features(
+                current_candle.start_time, current_candle.high, current_candle.low
+            )
         )
 
         # هم‌جهتی حرکت لحظه‌ای (تیک) با جهت کلی کندل در حال شکل‌گیری:
@@ -388,6 +523,12 @@ def build_feature_snapshot(
         snapshot["distance_from_open_ratio"] = None
         snapshot["stall_count_in_candle"] = None
         snapshot["last_stall_position_in_candle"] = None
+        snapshot["upper_edge_test_count"] = None
+        snapshot["lower_edge_test_count"] = None
+        snapshot["upper_edge_last_outcome"] = None
+        snapshot["lower_edge_last_outcome"] = None
+        snapshot["last_move_size_ratio"] = None
+        snapshot["prev_move_size_ratio"] = None
         snapshot["tick_vs_candle_alignment"] = None
 
     if candle_aggregator.get_previous_candle():
