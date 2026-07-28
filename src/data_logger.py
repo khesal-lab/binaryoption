@@ -58,6 +58,7 @@ class PendingTrade:
     entry_wall_time: float  # زمان محلی (time.time()) لحظهٔ کلیک، برای همبستگی با DealResultBuffer
     entry_symbol: str
     feature_snapshot: dict = field(default_factory=dict)
+    source: str = "manual"  # "manual" (کلیک کاربر) یا "bot" (کلیک خودکار مدل)
 
 
 def _interpret_deal_candidate(deal: dict) -> Optional[int]:
@@ -121,6 +122,9 @@ class DataLogger:
         self.sqlite_path = sqlite_path
         self.expiry_seconds = expiry_seconds
         self.deal_result_wait_seconds = deal_result_wait_seconds
+        # وین‌ریت جداگانه فقط برای معاملاتی که خودِ ربات (نه کاربر) باز کرده،
+        # تا بشود عملکرد لحظه‌ای مدل را مستقل از معاملات دستی دنبال کرد.
+        self.bot_trade_history = TradeHistory()
 
         self._init_sqlite()
 
@@ -148,13 +152,15 @@ class DataLogger:
         self._conn.execute("DROP TABLE IF EXISTS trades")
         self._conn.commit()
         self.trade_history.reset()
+        self.bot_trade_history.reset()
         print(f"[DataLogger] دیتاست پاک شد ({self.csv_path.name} و {self.sqlite_path.name}). "
               f"از این لحظه دوباره از صفر ذخیره می‌شود.")
 
     # -- ثبت لحظهٔ ورود --------------------------------------------------------
-    def capture_entry(self, direction: Direction) -> None:
+    def capture_entry(self, direction: Direction, source: str = "manual") -> None:
         """
-        این تابع در لحظهٔ فشردن کلید توسط کاربر صدا زده می‌شود. یک اسنپ‌شات کامل
+        این تابع در لحظهٔ فشردن کلید توسط کاربر (source="manual") یا کلیک
+        خودکار ربات معامله‌گر (source="bot") صدا زده می‌شود. یک اسنپ‌شات کامل
         و کاملاً نسبی از وضعیت فعلی بازار می‌گیرد و یک Task پس‌زمینه برای ارزیابی
         نتیجه بعد از expiry_seconds ثانیه ایجاد می‌کند (بدون بلاک کردن بقیهٔ برنامه).
         """
@@ -169,6 +175,7 @@ class DataLogger:
         )
         snapshot.update(self.trade_history.as_feature_dict())
         snapshot["direction"] = direction
+        snapshot["meta_trade_source"] = source
 
         pending = PendingTrade(
             direction=direction,
@@ -177,9 +184,11 @@ class DataLogger:
             entry_wall_time=time.time(),
             entry_symbol=latest.symbol,
             feature_snapshot=snapshot,
+            source=source,
         )
 
-        print(f"[DataLogger] معامله {direction} ثبت شد. "
+        source_tag = " [ربات]" if source == "bot" else ""
+        print(f"[DataLogger] معامله{source_tag} {direction} ثبت شد. "
               f"در حال انتظار برای نتیجه ({self.expiry_seconds} ثانیه)...")
 
         asyncio.create_task(self._evaluate_and_log(pending))
@@ -211,6 +220,8 @@ class DataLogger:
                 result_source = "ws_deal"
 
         self.trade_history.add_result(result)
+        if pending.source == "bot":
+            self.bot_trade_history.add_result(result)
 
         row = dict(pending.feature_snapshot)
         # ستون‌های meta_* فقط برای ردیابی/دیباگ‌اند؛ مقدار خام قیمت دارند و
@@ -237,8 +248,13 @@ class DataLogger:
         progress = f" | مجموع کل معاملات ثبت‌شده: {lifetime_total}"
         if target:
             progress += f" از حدود {target} (نمونهٔ اولیهٔ پیشنهادی) — {min(100, lifetime_total / target * 100):.0f}٪"
-        print(f"[DataLogger] نتیجهٔ معامله: {outcome_text} (منبع: {result_source}) | "
+        source_tag = " [ربات]" if pending.source == "bot" else ""
+        print(f"[DataLogger] نتیجهٔ معامله{source_tag}: {outcome_text} (منبع: {result_source}) | "
               f"وین‌ریت لحظه‌ای: {self.trade_history.get_rolling_winrate():.2%}{progress}")
+        if pending.source == "bot":
+            print(f"[DataLogger] وین‌ریت زندهٔ ربات (auto-trade): "
+                  f"{self.bot_trade_history.get_rolling_winrate():.2%} "
+                  f"روی {self.bot_trade_history.total_trades()} معاملهٔ خودکار")
 
     def _lifetime_trade_count(self) -> int:
         """
