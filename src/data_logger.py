@@ -232,8 +232,25 @@ class DataLogger:
         self._append_row(row)
 
         outcome_text = "WIN ✅" if result == 1 else "LOSS ❌"
+        lifetime_total = self._lifetime_trade_count()
+        target = config.MIN_TRADES_FOR_INITIAL_TRAINING
+        progress = f" | مجموع کل معاملات ثبت‌شده: {lifetime_total}"
+        if target:
+            progress += f" از حدود {target} (نمونهٔ اولیهٔ پیشنهادی) — {min(100, lifetime_total / target * 100):.0f}٪"
         print(f"[DataLogger] نتیجهٔ معامله: {outcome_text} (منبع: {result_source}) | "
-              f"وین‌ریت لحظه‌ای: {self.trade_history.get_rolling_winrate():.2%}")
+              f"وین‌ریت لحظه‌ای: {self.trade_history.get_rolling_winrate():.2%}{progress}")
+
+    def _lifetime_trade_count(self) -> int:
+        """
+        تعداد کل معاملات ثبت‌شده در طول عمر دیتاست (نه فقط اجرای جاری) — از
+        روی SQLite که همیشه معتبر و انباشته از همهٔ اجراهای قبلی است.
+        """
+        cursor = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='trades'"
+        )
+        if cursor.fetchone() is None:
+            return 0
+        return self._conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
 
     async def _find_platform_deal_result(self, pending: PendingTrade) -> Optional[dict]:
         """
