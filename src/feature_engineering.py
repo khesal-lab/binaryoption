@@ -496,6 +496,10 @@ def build_feature_snapshot(
         snapshot["distance_from_open_ratio"] = (
             (latest.price - current_candle.open) / rng if rng > 0 else 0.0
         )
+        # نیمهٔ بالایی کندل (بالاتر از قیمت بازشدن) یا نیمهٔ پایینی (پایین‌تر از
+        # قیمت بازشدن) — مستقل از رنگ کندل، صرفاً موقعیت قیمت لحظه‌ای نسبت به
+        # نقطهٔ شروع همین کندلِ در حال شکل‌گیری:
+        snapshot["price_above_open"] = int(latest.price >= current_candle.open)
         snapshot.update(current_candle.as_dict("candle_curr"))
         snapshot.update(
             tick_history.get_stall_features(current_candle.start_time, current_candle.high, current_candle.low)
@@ -521,6 +525,7 @@ def build_feature_snapshot(
     else:
         snapshot["price_position_in_candle"] = None
         snapshot["distance_from_open_ratio"] = None
+        snapshot["price_above_open"] = None
         snapshot["stall_count_in_candle"] = None
         snapshot["last_stall_position_in_candle"] = None
         snapshot["upper_edge_test_count"] = None

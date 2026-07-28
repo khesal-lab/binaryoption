@@ -58,6 +58,23 @@ def main() -> None:
     df = df.dropna(subset=["result"])
     y_all = df["result"].astype(int)
 
+    # تشخیص زودهنگام دو مشکل رایج قبل از آموزش: تعداد نمونهٔ خیلی کم برای یکی
+    # از دو جهت (CALL/PUT)، و وین‌ریت خیلی متفاوت بین آن دو - هرکدام باعث
+    # می‌شود مدل نتواند جهت را درست یاد بگیرد.
+    print("\n--- توزیع جهت معاملات در دادهٔ آموزشی ---")
+    direction_counts = df["direction"].value_counts()
+    print(direction_counts.to_dict())
+    for direction in ("CALL", "PUT"):
+        subset = df[df["direction"] == direction]
+        if len(subset) > 0:
+            winrate = subset["result"].astype(int).mean()
+            print(f"  {direction}: {len(subset)} معامله، وین‌ریت {winrate:.1%}")
+    min_direction_count = direction_counts.min() if len(direction_counts) == 2 else 0
+    if min_direction_count < 0.2 * len(df):
+        print(f"⚠️  هشدار: یکی از دو جهت (CALL/PUT) کمتر از ۲۰٪ کل داده را دارد "
+              f"({min_direction_count} از {len(df)}). مدل احتمالاً نمی‌تواند برای آن جهت "
+              f"سیگنال معتبری یاد بگیرد - سعی کنید معاملات هر دو جهت را متعادل‌تر جمع‌آوری کنید.")
+
     records = df.drop(columns=["result"]).to_dict(orient="records")
     flattened_rows = [flatten_snapshot_for_model(row) for row in records]
 
@@ -88,6 +105,24 @@ def main() -> None:
     print("==========================================")
     print("\nDetailed Performance Report:")
     print(classification_report(y_test, y_pred))
+
+    # هشدار مهم: اگر مدل اصلاً روی direction_call یا فیچرهای «هم‌جهت با
+    # تصمیم» Split نزده باشد، یعنی در معاملهٔ زنده نمی‌تواند بین CALL و PUT
+    # فرق بگذارد و همیشه یک جهت را انتخاب می‌کند (دقیقاً همان باگی که قبلاً
+    # دیده شد). این‌جا زودتر و واضح هشدار می‌دهیم.
+    direction_related_cols = [
+        c for c in X.columns
+        if c == "direction_call" or c.endswith("_in_direction") or c.startswith("distance_to_")
+        or c == "trend_aligned_with_direction" or c == "candle_color_aligned_with_direction"
+    ]
+    importances = dict(zip(X.columns, model.feature_importances_))
+    direction_signal_total = sum(importances.get(c, 0.0) for c in direction_related_cols)
+    print(f"\nمجموع اهمیت فیچرهای مرتبط با جهت (direction_call + هم‌جهت‌ها): {direction_signal_total:.4f}")
+    if direction_signal_total == 0.0:
+        print("⚠️  هشدار جدی: مدل هیچ‌کدام از فیچرهای مرتبط با جهت معامله را استفاده نکرده "
+              "— یعنی در معاملهٔ زنده احتمالاً همیشه یک جهت ثابت (مثلاً همیشه CALL) انتخاب "
+              "خواهد کرد، نه این‌که واقعاً بین دو جهت تصمیم بگیرد. راه‌حل: دادهٔ بیشتر/متنوع‌تر "
+              "جمع‌آوری کنید (به‌خصوص از جهتی که کمتر معامله شده)، یا max_depth را کمی افزایش دهید.")
 
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
     model.save_model(str(config.MODEL_JSON_PATH))

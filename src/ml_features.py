@@ -7,13 +7,20 @@
 (src/live_predictor.py) صدا زده می‌شود — تا هیچ‌وقت تفاوتی بین ستون‌های
 دیده‌شده در آموزش و ستون‌های ساخته‌شده در لحظهٔ معامله به‌وجود نیاید.
 
-سه کار انجام می‌شود:
+چهار کار انجام می‌شود:
     ۱. Flatten کردن ستون‌های JSON (شکل چارت و توالی سرعت تیک) به چند ستون
        عددی مجزا با طول ثابت (Padding با مقدار خنثی اگر داده کافی نبود).
     ۲. تبدیل جهت معامله (direction: "CALL"/"PUT") به یک ویژگی عددی
        (direction_call: ۱ یا ۰) — چون در معاملهٔ زنده، جهت خودش یکی از
        ورودی‌های تصمیم است (مدل هر دو جهت را امتحان می‌کند)، نه یک برچسب.
-    ۳. حذف قطعی ستون‌هایی که یا متادیتای خام قیمت‌اند، یا (مهم‌تر) فقط بعد
+    ۳. ساخت چند ویژگی «هم‌جهت با تصمیم» (Direction-Interaction): برای این‌که
+       مدل مجبور نباشد خودش از میان ده‌ها فیچر بی‌ربط، تعامل بین direction_call
+       و فیچرهای جهت‌دار (مومنتوم، روند، رنگ کندل، فاصله تا حمایت/مقاومت) را
+       کشف کند — که با تعداد دادهٔ محدود عملاً رخ نمی‌دهد (دیده شد که
+       XGBoost حتی یک‌بار هم روی direction_call به‌تنهایی Split نمی‌زند)،
+       این تعامل‌ها را صریح می‌سازیم: مثلاً «آیا مومنتوم هم‌جهت با معاملهٔ
+       انتخابی است» یا «چقدر فاصله در جهت مطلوب معامله وجود دارد».
+    ۴. حذف قطعی ستون‌هایی که یا متادیتای خام قیمت‌اند، یا (مهم‌تر) فقط بعد
        از پایان معامله محاسبه می‌شوند — یعنی در لحظهٔ ورود اصلاً وجود ندارند
        (مثل price_change_pct) و نگه‌داشتنشان در دادهٔ آموزشی «نشت اطلاعات از
        آینده» (Data Leakage) است: دقتی که با آن‌ها روی داده تست به دست
@@ -87,6 +94,40 @@ def _encode_direction(row: dict) -> None:
     row["direction_call"] = 1 if direction == "CALL" else 0
 
 
+def _add_direction_interaction_features(row: dict) -> None:
+    """
+    فیچرهای «هم‌جهت با تصمیم»: به‌جای این‌که مدل خودش از میان ده‌ها فیچر
+    بی‌ربط تعامل بین جهت معامله و فیچرهای جهت‌دار را کشف کند (که با چند صد
+    ردیف داده عملاً اتفاق نمی‌افتد)، این تعامل را صریح می‌سازیم. sign=+۱ برای
+    CALL و -۱ برای PUT است؛ ضرب کردن یک فیچر جهت‌دار در sign یعنی «این فیچر
+    هم‌جهت با معاملهٔ انتخابی است یا مخالف آن».
+    """
+    sign = 1.0 if row.get("direction_call") == 1 else -1.0
+
+    def _num(key: str, default: float = 0.0) -> float:
+        value = row.get(key)
+        return default if value is None else float(value)
+
+    row["momentum_in_direction"] = sign * _num("velocity_pct")
+    row["momentum_smoothed_in_direction"] = sign * _num("velocity_pct_smoothed")
+    row["acceleration_in_direction"] = sign * _num("acceleration_pct")
+    row["trend_aligned_with_direction"] = sign * _num("trend_regime")
+    row["streak_aligned_with_direction"] = sign * _num("candle_color_streak")
+    row["candle_color_aligned_with_direction"] = sign * (2 * _num("candle_curr_is_bullish", 0.5) - 1)
+
+    # برای CALL، «هدف» صعود قیمت است (مقاومت مانع، حمایت پشتیبان)؛ برای PUT
+    # برعکس. این دو فیچر می‌گویند «در جهتی که رفته‌ام چقدر راه باز است» و
+    # «نزدیک‌ترین دیوار مخالف من چقدر فاصله دارد».
+    dist_to_resistance = row.get("dist_to_resistance_atr")
+    dist_to_support = row.get("dist_to_support_atr")
+    if sign > 0:
+        row["distance_to_target_atr"] = dist_to_resistance
+        row["distance_to_obstacle_atr"] = dist_to_support
+    else:
+        row["distance_to_target_atr"] = dist_to_support
+        row["distance_to_obstacle_atr"] = dist_to_resistance
+
+
 def flatten_snapshot_for_model(snapshot: dict) -> dict[str, float]:
     """
     یک اسنپ‌شات خام (همان دیکشنری که DataLogger.capture_entry می‌سازد، یا یک
@@ -95,6 +136,7 @@ def flatten_snapshot_for_model(snapshot: dict) -> dict[str, float]:
     row = dict(snapshot)
 
     _encode_direction(row)
+    _add_direction_interaction_features(row)
     _flatten_chart_shape(row)
     _flatten_tick_velocities(row)
 
