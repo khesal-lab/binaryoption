@@ -19,6 +19,7 @@ from typing import Optional
 import pandas as pd
 import xgboost as xgb
 
+import config
 from src.ml_features import flatten_snapshot_for_model
 
 
@@ -40,15 +41,25 @@ class LivePredictor:
     def predict_direction(self, base_snapshot: dict) -> tuple[Optional[str], float]:
         """
         بهترین جهت (CALL یا PUT) و احتمال برد پیش‌بینی‌شدهٔ مدل برای آن را
-        برمی‌گرداند. اگر خطایی رخ دهد، (None, 0.0) برمی‌گردد تا صدا‌زننده هرگز
-        بر اساس دادهٔ نامعتبر معامله نکند.
+        برمی‌گرداند.
+
+        نکتهٔ مهم: اگر مدل عملاً هیچ تفاوتی بین دو فرضیه قائل نباشد (دو
+        احتمال تقریباً یکسان — که وقتی مدل هنوز سیگنال جهت‌داری قوی یاد
+        نگرفته کاملاً ممکن است رخ دهد)، هرگز نباید یکی از دو جهت را به‌طور
+        پیش‌فرض انتخاب کنیم؛ این دقیقاً همان چیزی بود که قبلاً باعث می‌شد
+        ربات همیشه CALL بزند (چون مقایسهٔ اکید `>` با ترتیب حلقهٔ ثابت،
+        در تساوی همیشه اولین گزینه یعنی CALL را برنده اعلام می‌کرد). این‌جا
+        چنین لحظه‌ای را «بدون سیگنال کافی» در نظر می‌گیریم و (None, ...)
+        برمی‌گردانیم تا صدا‌زننده معامله نکند.
         """
-        best_direction: Optional[str] = None
-        best_prob = -1.0
-        for direction in ("CALL", "PUT"):
-            X = self._build_row(base_snapshot, direction)
-            prob_win = float(self.model.predict_proba(X)[0][1])
-            if prob_win > best_prob:
-                best_prob = prob_win
-                best_direction = direction
-        return best_direction, max(best_prob, 0.0)
+        X_call = self._build_row(base_snapshot, "CALL")
+        X_put = self._build_row(base_snapshot, "PUT")
+        call_prob = float(self.model.predict_proba(X_call)[0][1])
+        put_prob = float(self.model.predict_proba(X_put)[0][1])
+
+        if abs(call_prob - put_prob) < config.AUTO_TRADE_MIN_DIRECTION_MARGIN:
+            return None, max(call_prob, put_prob)
+
+        if call_prob > put_prob:
+            return "CALL", call_prob
+        return "PUT", put_prob
