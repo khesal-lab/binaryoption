@@ -136,6 +136,21 @@ class DataLogger:
     def close(self) -> None:
         self._conn.close()
 
+    def reset_dataset(self) -> None:
+        """
+        دیتاست را کاملاً از صفر شروع می‌کند: فایل CSV حذف، جدول SQLite خالی، و
+        تاریخچهٔ معاملات (وین‌ریت/الگوی اخیر) پاک می‌شود. برای زمانی که می‌خواهید
+        بدون داده‌های قبلی از نو شروع کنید (مثلاً بعد از تغییر ساختار ویژگی‌ها).
+        این عمل غیرقابل بازگشت است.
+        """
+        if self.csv_path.exists():
+            self.csv_path.unlink()
+        self._conn.execute("DROP TABLE IF EXISTS trades")
+        self._conn.commit()
+        self.trade_history.reset()
+        print(f"[DataLogger] دیتاست پاک شد ({self.csv_path.name} و {self.sqlite_path.name}). "
+              f"از این لحظه دوباره از صفر ذخیره می‌شود.")
+
     # -- ثبت لحظهٔ ورود --------------------------------------------------------
     def capture_entry(self, direction: Direction) -> None:
         """

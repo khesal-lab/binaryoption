@@ -45,6 +45,11 @@ class TradeHistory:
         self._recent_results.append(result)
         self._all_results.append(result)
 
+    def reset(self) -> None:
+        """تاریخچهٔ معاملات را کاملاً پاک می‌کند (برای شروع دوباره از صفر)."""
+        self._recent_results.clear()
+        self._all_results.clear()
+
     def get_recent_pattern(self) -> list[int]:
         """الگوی آخرین معاملات، مثلاً [1, 0, 1]. اگر تعداد کافی نباشد کوتاه‌تر است."""
         return list(self._recent_results)
