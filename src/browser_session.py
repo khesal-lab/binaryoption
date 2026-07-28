@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -116,14 +118,74 @@ def extract_ticks_from_payload(payload) -> list[Tick]:
     return ticks
 
 
+# کلیدهایی که در پیام‌های «نتیجهٔ معامله»/«بستن قرارداد» بروکرهای مشابه معمولاً دیده می‌شوند.
+# فرمت دقیق Pocket Option مستند نیست؛ این یک حدس منطقی است که باید با نگاه‌کردن به
+# data/raw_ws_frames.log بعد از چند معاملهٔ واقعی تأیید/اصلاح شود.
+_DEAL_MARKER_KEYS = {
+    "profit", "win", "iswin", "is_win", "result", "status",
+    "amount", "payout", "closeprofit", "close_profit", "deal",
+}
+
+
+def extract_deal_candidates(payload) -> list[dict]:
+    """
+    به‌صورت بازگشتی دنبال دیکشنری‌هایی می‌گردد که حداقل یکی از کلیدهای بالا را
+    دارند — این‌ها «کاندیدای پیام نتیجهٔ معامله» هستند، نه لزوماً قطعی.
+    خروجی این تابع صرفاً برای تلاش برای گرفتن نتیجهٔ معامله از خودِ پلتفرم است؛
+    اگر چیزی پیدا نشود یا اشتباه تفسیر شود، سیستم به‌طور خودکار به محاسبهٔ
+    داخلی (بر اساس تیک‌های خودمان) برمی‌گردد.
+    """
+    candidates: list[dict] = []
+
+    def _walk(node):
+        if isinstance(node, dict):
+            keys_lower = {str(k).lower() for k in node.keys()}
+            if keys_lower & _DEAL_MARKER_KEYS:
+                candidates.append(node)
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(payload)
+    return candidates
+
+
+class DealResultBuffer:
+    """
+    نگه‌دارندهٔ کاندیداهای اخیر «پیام نتیجهٔ معامله» که از WebSocket شنود شده‌اند،
+    به همراه زمان محلی دریافت (wall-clock) هر کدام. DataLogger بعد از هر معامله
+    در یک بازهٔ زمانی مشخص (حوالی لحظهٔ انقضا) دنبال نزدیک‌ترین کاندیدا می‌گردد.
+    """
+
+    def __init__(self, maxlen: int = 100):
+        self.buffer: deque[tuple[float, dict]] = deque(maxlen=maxlen)
+
+    def add(self, raw: dict) -> None:
+        self.buffer.append((time.time(), raw))
+
+    def find_and_consume(self, after_time: float, before_time: float) -> Optional[dict]:
+        """
+        اولین کاندیدایی که زمان دریافتش داخل بازهٔ [after_time, before_time] باشد
+        را برمی‌گرداند و از بافر حذف می‌کند (تا برای معاملهٔ دیگری دوباره استفاده نشود).
+        """
+        for i, (received_at, raw) in enumerate(self.buffer):
+            if after_time <= received_at <= before_time:
+                del self.buffer[i]
+                return raw
+        return None
+
+
 class WebSocketListener:
     """
     این کلاس به تمام WebSocketهای صفحه گوش می‌دهد، تیک‌های استخراج‌شده را
     داخل یک asyncio.Queue می‌ریزد و در صورت قطع اتصال، وضعیت را لاگ می‌کند.
     """
 
-    def __init__(self, tick_queue: asyncio.Queue):
+    def __init__(self, tick_queue: asyncio.Queue, deal_buffer: Optional[DealResultBuffer] = None):
         self.tick_queue = tick_queue
+        self.deal_buffer = deal_buffer
         self._active_sockets: set[WebSocket] = set()
         self.connected_event = asyncio.Event()
 
@@ -167,6 +229,10 @@ class WebSocketListener:
                 except asyncio.QueueEmpty:
                     pass
                 self.tick_queue.put_nowait(tick)
+
+        if self.deal_buffer is not None:
+            for deal in extract_deal_candidates(payload):
+                self.deal_buffer.add(deal)
 
 
 async def launch_browser_and_wait_for_login() -> tuple[BrowserContext, Page]:
