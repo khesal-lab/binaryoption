@@ -2,20 +2,23 @@
 اسکریپت اصلی — هماهنگ‌کنندهٔ تمام بخش‌ها
 ==========================================
 
-این فایل چهار بخش قبلی (browser_session, feature_engineering, state_tracker,
-data_logger) را با asyncio.gather به‌صورت هم‌زمان (Concurrent) اجرا می‌کند:
+این فایل بخش‌های قبلی (browser_session, feature_engineering, market_structure,
+state_tracker, data_logger, trade_click_listener) را با asyncio.gather به‌صورت
+هم‌زمان (Concurrent) اجرا می‌کند:
 
     Task 1: خواندن تیک‌های خام از صف و به‌روزرسانی TickBuffer/CandleAggregator
-    Task 2: گوش‌دادن به ورودی کاربر در ترمینال برای ثبت معامله (کلید c/p/q)
+    Task 2: گوش‌دادن به ورودی ترمینال، فقط برای خروج امن ('q') یا ثبت دستی
+            معامله به‌عنوان جایگزین (c/p) — روش اصلی ثبت معامله، کلیک واقعی
+            روی دکمه‌های BUY/SELL خودِ پلتفرم است (task_click_listener)
     Task 3: نظارت بر سلامت اتصال WebSocket و تلاش برای Reconnect در صورت قطعی
 
 نحوهٔ استفاده:
     python main.py
     - مرورگر باز می‌شود -> به‌صورت دستی وارد حساب دمو شوید -> Enter بزنید.
-    - در ترمینال:
-        c + Enter  -> ثبت معاملهٔ CALL (خرید/صعودی) در همین لحظه
-        p + Enter  -> ثبت معاملهٔ PUT  (فروش/نزولی) در همین لحظه
-        q + Enter  -> خروج امن از برنامه
+    - از این‌جا به بعد، دقیقاً مثل همیشه معامله کنید: هر کلیک واقعی روی دکمهٔ
+      BUY یا SELL پلتفرم به‌طور خودکار شناسایی و ثبت می‌شود.
+    - در ترمینال هم می‌توانید به‌جای کلیک، 'c' (CALL) یا 'p' (PUT) تایپ کنید
+      (روش جایگزین/دستی)، و 'q' + Enter برای خروج امن.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import asyncio
 
 import config
 from src.browser_session import (
+    DealResultBuffer,
     WebSocketListener,
     launch_browser_and_wait_for_login,
     reconnect_page_if_needed,
@@ -32,6 +36,7 @@ from src.feature_engineering import TickBuffer, TickHistory, CandleAggregator
 from src.market_structure import MarketStructureTracker
 from src.state_tracker import TradeHistory
 from src.data_logger import DataLogger
+from src.trade_click_listener import attach_trade_button_listeners
 
 
 async def tick_consumer_task(
@@ -59,16 +64,13 @@ async def tick_consumer_task(
 async def hotkey_listener_task(data_logger: DataLogger, stop_event: asyncio.Event) -> None:
     """
     Task 2: ورودی ترمینال را بدون بلاک‌کردن event loop می‌خواند (با
-    run_in_executor) و بر اساس آن معاملهٔ CALL/PUT ثبت می‌کند یا برنامه را
-    خاتمه می‌دهد.
-
-    توجه: این روش نیازمند فوکوس روی ترمینال است (نه هات‌کی سراسری/Global).
-    اگر نیاز به هات‌کی سراسری (حتی وقتی فوکوس روی مرورگر است) دارید، می‌توانید
-    از کتابخانهٔ خارجی `keyboard` استفاده کنید؛ آن کتابخانه در لینوکس به دسترسی
-    root نیاز دارد که به همین دلیل این‌جا استفاده نشده است.
+    run_in_executor). روش اصلی ثبت معامله، کلیک واقعی روی دکمه‌های BUY/SELL
+    خودِ پلتفرم است (نگاه کنید به src/trade_click_listener.py)؛ این تابع فقط
+    یک راه جایگزین/دستی (c/p) و راه خروج امن (q) فراهم می‌کند.
     """
     loop = asyncio.get_event_loop()
-    print("\nراهنما: 'c' + Enter برای CALL | 'p' + Enter برای PUT | 'q' + Enter برای خروج\n")
+    print("\nراهنما: حالا می‌توانید مثل همیشه روی BUY/SELL در پلتفرم کلیک کنید و خودکار ثبت می‌شود.")
+    print("جایگزین دستی: 'c' + Enter برای CALL | 'p' + Enter برای PUT | 'q' + Enter برای خروج\n")
 
     while not stop_event.is_set():
         user_input = await loop.run_in_executor(None, input, "> ")
@@ -118,12 +120,23 @@ async def main() -> None:
     market_structure = MarketStructureTracker()
     trade_history = TradeHistory()
 
+    deal_buffer = DealResultBuffer()
+
     context, page = await launch_browser_and_wait_for_login()
 
-    ws_listener = WebSocketListener(tick_queue)
+    ws_listener = WebSocketListener(tick_queue, deal_buffer)
     ws_listener.attach(page)
 
-    data_logger = DataLogger(tick_buffer, tick_history, candle_aggregator, market_structure, trade_history)
+    data_logger = DataLogger(
+        tick_buffer, tick_history, candle_aggregator, market_structure, trade_history, deal_buffer
+    )
+
+    # شنود کلیک واقعی روی دکمه‌های BUY/SELL خودِ پلتفرم — روش اصلی ثبت معامله
+    await attach_trade_button_listeners(
+        page,
+        on_call_click=lambda: data_logger.capture_entry("CALL"),
+        on_put_click=lambda: data_logger.capture_entry("PUT"),
+    )
 
     stop_event = asyncio.Event()
 

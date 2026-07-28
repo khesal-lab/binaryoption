@@ -4,6 +4,7 @@ __pycache__/
 data/*.csv
 data/*.sqlite3
 data/*.log
+data/diagnostics/
 !data/.gitkeep
 .venv/
 venv/

@@ -17,19 +17,31 @@
 فقط برای ردیابی/دیباگ‌اند و **نباید** به‌عنوان ورودی مدل استفاده شوند — چون مقدار
 خام قیمت هستند. تمام ستون‌های دیگر (غیر از meta_*، direction، result) نسبی‌اند
 و برای آموزش مدل مناسب‌اند.
+
+نکتهٔ نتیجهٔ معامله: از دو منبع تلاش می‌شود نتیجه گرفته شود:
+    ۱. «نتیجهٔ خودِ پلتفرم» (ws_deal): با شنود پیام‌های WebSocket که شبیه
+       اعلام نتیجهٔ معامله‌اند (تابع extract_deal_candidates در
+       browser_session.py). چون فرمت دقیق این پیام‌ها مستند نیست، این روش
+       هیوریستیک است و ممکن است نیاز به تنظیم داشته باشد.
+    ۲. «محاسبهٔ داخلی» (tick_fallback): مقایسهٔ قیمت لحظهٔ ورود و خروج از روی
+       تیک‌های خودمان — همیشه در دسترس است و اگر روش اول چیزی پیدا نکرد،
+       جایگزین آن می‌شود.
+ستون result_source مشخص می‌کند نتیجهٔ نهایی از کدام منبع آمده است.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Optional
 
 import pandas as pd
 
 import config
+from src.browser_session import DealResultBuffer
 from src.feature_engineering import TickBuffer, TickHistory, CandleAggregator, build_feature_snapshot
 from src.market_structure import MarketStructureTracker
 from src.state_tracker import TradeHistory
@@ -43,8 +55,41 @@ class PendingTrade:
     direction: Direction
     entry_price: float
     entry_time: float
+    entry_wall_time: float  # زمان محلی (time.time()) لحظهٔ کلیک، برای همبستگی با DealResultBuffer
     entry_symbol: str
     feature_snapshot: dict = field(default_factory=dict)
+
+
+def _interpret_deal_candidate(deal: dict) -> Optional[int]:
+    """
+    تلاش می‌کند از یک دیکشنری کاندیدای «نتیجهٔ معامله» یک لیبل ۰/۱ دربیاورد.
+    ترتیب اولویت: کلیدهای صریح برد/باخت، سپس کلیدهای عددی سود/زیان.
+    اگر هیچ‌کدام قابل تفسیر نبود، None برمی‌گرداند (یعنی از fallback استفاده شود).
+    """
+    lower_map = {str(k).lower(): v for k, v in deal.items()}
+
+    for key in ("iswin", "is_win", "win"):
+        if key in lower_map:
+            value = lower_map[key]
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, (int, float)):
+                return int(value > 0)
+            if isinstance(value, str):
+                return int(value.strip().lower() in ("1", "true", "win"))
+
+    for key in ("profit", "amount", "payout", "closeprofit", "close_profit"):
+        if key in lower_map and isinstance(lower_map[key], (int, float)):
+            return int(lower_map[key] > 0)
+
+    if "status" in lower_map and isinstance(lower_map["status"], str):
+        status = lower_map["status"].strip().lower()
+        if status in ("win", "won"):
+            return 1
+        if status in ("loss", "lose", "lost"):
+            return 0
+
+    return None
 
 
 class DataLogger:
@@ -60,18 +105,22 @@ class DataLogger:
         candle_aggregator: CandleAggregator,
         market_structure: MarketStructureTracker,
         trade_history: TradeHistory,
+        deal_buffer: Optional[DealResultBuffer] = None,
         csv_path=config.CSV_LOG_PATH,
         sqlite_path=config.SQLITE_DB_PATH,
         expiry_seconds: float = config.TRADE_EXPIRY_SECONDS,
+        deal_result_wait_seconds: float = config.DEAL_RESULT_WAIT_SECONDS,
     ):
         self.tick_buffer = tick_buffer
         self.tick_history = tick_history
         self.candle_aggregator = candle_aggregator
         self.market_structure = market_structure
         self.trade_history = trade_history
+        self.deal_buffer = deal_buffer
         self.csv_path = csv_path
         self.sqlite_path = sqlite_path
         self.expiry_seconds = expiry_seconds
+        self.deal_result_wait_seconds = deal_result_wait_seconds
 
         self._init_sqlite()
 
@@ -110,6 +159,7 @@ class DataLogger:
             direction=direction,
             entry_price=latest.price,
             entry_time=latest.timestamp,
+            entry_wall_time=time.time(),
             entry_symbol=latest.symbol,
             feature_snapshot=snapshot,
         )
@@ -132,7 +182,18 @@ class DataLogger:
             print("[DataLogger] هشدار: قیمت خروج پیدا نشد؛ این معامله لیبل نمی‌گیرد.")
             return
 
-        result = self._determine_result(pending.direction, pending.entry_price, exit_price)
+        tick_fallback_result = self._determine_result(pending.direction, pending.entry_price, exit_price)
+
+        # اولویت با نتیجهٔ خودِ پلتفرم (ws_deal)؛ اگر پیدا نشد یا قابل تفسیر نبود،
+        # از محاسبهٔ داخلی (tick_fallback) استفاده می‌کنیم.
+        result = tick_fallback_result
+        result_source = "tick_fallback"
+        raw_deal = await self._find_platform_deal_result(pending)
+        if raw_deal is not None:
+            interpreted = _interpret_deal_candidate(raw_deal)
+            if interpreted is not None:
+                result = interpreted
+                result_source = "ws_deal"
 
         self.trade_history.add_result(result)
 
@@ -144,17 +205,42 @@ class DataLogger:
         row["meta_entry_timestamp"] = pending.entry_time
         row["meta_exit_price"] = exit_price
         row["meta_exit_timestamp"] = exit_timestamp
+        row["meta_raw_deal_json"] = json.dumps(raw_deal) if raw_deal is not None else None
         # تنها ویژگی نسبی مشتق از ورود/خروج (قابل استفاده در تحلیل، نه لزوماً در مدل):
         row["price_change_pct"] = (
             (exit_price - pending.entry_price) / pending.entry_price if pending.entry_price else None
         )
+        row["result_source"] = result_source  # ws_deal یا tick_fallback
+        row["tick_fallback_result"] = tick_fallback_result  # برای مقایسه/اعتبارسنجی دو روش
         row["result"] = result  # Win = 1 / Loss = 0  <-- لیبل نهایی برای آموزش مدل
 
         self._append_row(row)
 
         outcome_text = "WIN ✅" if result == 1 else "LOSS ❌"
-        print(f"[DataLogger] نتیجهٔ معامله: {outcome_text} | "
+        print(f"[DataLogger] نتیجهٔ معامله: {outcome_text} (منبع: {result_source}) | "
               f"وین‌ریت لحظه‌ای: {self.trade_history.get_rolling_winrate():.2%}")
+
+    async def _find_platform_deal_result(self, pending: PendingTrade) -> Optional[dict]:
+        """
+        بعد از لحظهٔ انقضا، تا deal_result_wait_seconds ثانیه دنبال یک پیام
+        «نتیجهٔ معامله» از خودِ پلتفرم می‌گردد که زمان دریافتش حوالی لحظهٔ
+        انقضا باشد. اگر DealResultBuffer تنظیم نشده باشد، فوراً None برمی‌گرداند.
+        """
+        if self.deal_buffer is None:
+            return None
+
+        expected_settle_wall_time = pending.entry_wall_time + self.expiry_seconds
+        deadline = time.monotonic() + self.deal_result_wait_seconds
+        window_start = expected_settle_wall_time - 1.0
+
+        while time.monotonic() < deadline:
+            window_end = time.time() + 0.01
+            deal = self.deal_buffer.find_and_consume(window_start, window_end)
+            if deal is not None:
+                return deal
+            await asyncio.sleep(0.1)
+
+        return None
 
     async def _wait_for_price_after(self, exit_timestamp: float, max_wait: float = 2.0) -> float | None:
         """
