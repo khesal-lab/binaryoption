@@ -180,36 +180,44 @@ class MarketStructureTracker:
             return 0.0
         return (candle.upper_wick - candle.lower_wick) / total
 
-    def get_normalized_chart_shape(self, current_price: float, atr_ref: Optional[float]) -> list[dict]:
+    def get_normalized_chart_shape(self, current_candle: Optional[Candle] = None) -> list[dict]:
         """
-        شکل N کندل اخیر (پیش‌فرض ۲۰ تا) با **لحظهٔ ورود به معامله** (نه یک
-        بازهٔ ثابت دلخواه) به‌عنوان مبدأ صفر: هر مقدار OHLC هر کندل به‌صورت
-        (مقدار - قیمت لحظهٔ ورود) / ATR بیان می‌شود.
+        دقیقاً همان چیزی که روی صفحهٔ چارت دیده می‌شود: یک «پنجرهٔ دیداری» ثابت
+        (پیش‌فرض ۲۰ کندل، شامل کندلِ در حال شکل‌گیری فعلی به‌عنوان لبهٔ راست
+        صفحه) که محور قیمتش خودش را با همان پنجره Auto-Scale می‌کند — دقیقاً مثل
+        صفحهٔ واقعی پلتفرم که با ورود کندل جدید، مقیاس Y را با محدودهٔ کندل‌های
+        دیده‌شده تنظیم می‌کند.
 
-        صفر یعنی دقیقاً همان‌جایی که الان ایستاده‌ایم؛ عدد مثبت یعنی بالای
-        قیمت فعلی، منفی یعنی پایین آن — دقیقاً همان‌طور که یک تریدر از «همین
-        لحظه» به شکل چارت نگاه می‌کند، نه از یک قاب مطلق و بی‌ربط به موقعیت خودش.
-        محور زمان هم نسبی است: `t` تعداد کندل قبل از لحظهٔ ورود است (۱- =
-        آخرین کندل تکمیل‌شده، ۲- = کندل قبل از آن و ...).
+        هیچ مرجع بیرونی (نه قیمت لحظهٔ ورود، نه ATR، نه شمارهٔ زمانی) استفاده
+        نمی‌شود؛ فقط مختصات نسبی خودِ پنجره (۰ تا ۱ بر اساس های/لوی همین پنجره).
+        ترتیب لیست از قدیم به جدید است (دقیقاً مثل خواندن چارت از چپ به راست)،
+        و همین ترتیب جایگزین هر عدد زمانی می‌شود.
         """
-        candles_list = list(self.candles)[-self.chart_window:]
-        if not candles_list or not atr_ref or atr_ref <= 0:
+        closed = list(self.candles)
+        window = closed[-(self.chart_window - 1):] if current_candle else closed[-self.chart_window:]
+        if current_candle:
+            window = window + [current_candle]
+        if not window:
             return []
 
-        def rel(v: float) -> float:
-            return (v - current_price) / atr_ref
+        window_high = max(c.high for c in window)
+        window_low = min(c.low for c in window)
+        span = window_high - window_low
+        if span <= 0:
+            return []
 
-        n = len(candles_list)
+        def norm(v: float) -> float:
+            return (v - window_low) / span
+
         return [
             {
-                "t": -(n - i),
-                "o": rel(c.open),
-                "h": rel(c.high),
-                "l": rel(c.low),
-                "c": rel(c.close),
+                "o": norm(c.open),
+                "h": norm(c.high),
+                "l": norm(c.low),
+                "c": norm(c.close),
                 "bullish": int(c.is_bullish),
             }
-            for i, c in enumerate(candles_list)
+            for c in window
         ]
 
     def _swing_range(self) -> Optional[float]:
@@ -230,7 +238,7 @@ class MarketStructureTracker:
         self,
         current_price: float,
         current_time: float,
-        current_candle_range: Optional[float] = None,
+        current_candle: Optional[Candle] = None,
     ) -> dict:
         features: dict = {}
 
@@ -240,6 +248,7 @@ class MarketStructureTracker:
         features["swing_range_defined"] = int(swing_range is not None)
 
         # نسبت محدودهٔ کندل جاری به محدودهٔ سوئینگ: این کندل چه سهمی از کل نوسان دارد
+        current_candle_range = current_candle.range if current_candle else None
         features["candle_range_to_swing_range_ratio"] = (
             current_candle_range / swing_range
             if (current_candle_range is not None and swing_range)
@@ -363,9 +372,9 @@ class MarketStructureTracker:
             features["wick_asymmetry_current"] = None
             features["wick_asymmetry_relative"] = None
 
-        # --- شکل چارت با مبدأ لحظهٔ ورود (برای یادگیری الگوی بصری «از اینجا که هستم») ---
+        # --- شکل چارت دقیقاً مثل صفحهٔ نمایش (پنجرهٔ دیداری خود-مقیاس، بدون مرجع بیرونی) ---
         features["chart_shape_json"] = json.dumps(
-            self.get_normalized_chart_shape(current_price, atr_ref)
+            self.get_normalized_chart_shape(current_candle)
         )
 
         return features
