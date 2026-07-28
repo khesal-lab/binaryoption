@@ -140,11 +140,11 @@ data/                         خروجی‌های تولیدشده (CSV، SQLite
 | سرعت/شتاب | `velocity_pct`, `acceleration_pct` و نسخه‌های هموارشدهٔ آن‌ها (درصد تغییر قیمت بر ثانیه، نه مقدار مطلق) |
 | دنبالهٔ تیک‌های اخیر | `recent_tick_velocities_json` (سرعت درصدی هر تیک به تیک بعدی در کل بافر ۱۰تایی، نه فقط دو عدد خلاصه)، `ticks_since_direction_change` (چند تیک متوالی است حرکت هم‌جهت بوده، پایداری/تردید حرکت لحظه‌ای) |
 | حرکت ناگهانی | `spike_zscore` (آیا حرکت لحظه‌ای نسبت به نوسان عادی اخیر غیرعادی است) |
-| موقعیت در کندل جاری | `price_position_in_candle`, `distance_from_open_ratio` |
+| موقعیت در کندل جاری | `price_position_in_candle`, `distance_from_open_ratio`, `price_above_open` (۱=قیمت لحظه‌ای بالاتر از قیمت بازشدن کندلِ در حال شکل‌گیری/نیمهٔ بالایی، ۰=پایین‌تر/نیمهٔ پایینی) |
 | توقف نشانگر | `stall_count_in_candle`, `last_stall_position_in_candle` |
 | رفتار لبهٔ کندل | `upper_edge_test_count`/`lower_edge_test_count` (چند بار قیمت وارد ۱۵٪ بالایی/پایینی رنج کندل شده)، `upper_edge_last_outcome`/`lower_edge_last_outcome` (۱=بعداً از آن لبه فراتر رفت/Extend، ۰=همان‌جا رد شد/Reject)، `last_move_size_ratio`/`prev_move_size_ratio` (اندازهٔ جهش فعلی و جهش قبلی نسبت به رنج کندل، برای مقایسهٔ فاصله/بزرگی جهش‌های متوالی) |
 | هم‌جهتی تیک با کندل | `tick_vs_candle_alignment` (آیا حرکت ۳ ثانیه‌ای هم‌جهت روند کندل دقیقه‌ای است یا در حال واگرایی) |
-| شکل کندل جاری/قبلی | `candle_curr_*`, `candle_prev1_*` — `body_ratio` (بدنه/رنج کل، همیشه بین ۰ و ۱؛ برای کندل بدون سایه دقیقاً ۱ می‌شود، بدون هیچ عدد قراردادی)، `upper_wick_ratio`, `lower_wick_ratio` |
+| شکل کندل جاری/قبلی | `candle_curr_*`, `candle_prev1_*` — `is_bullish` (رنگ کندل؛ برای `candle_curr` این مقدار لحظه‌به‌لحظه با هر تیک به‌روز می‌شود: چون `close` کندلِ در حال شکل‌گیری همیشه آخرین قیمت است، رنگ ثبت‌شده دقیقاً همان رنگ ناقص/لحظه‌ای است، نه رنگ نهایی بعد از بسته‌شدن)، `body_ratio` (بدنه/رنج کل، همیشه بین ۰ و ۱؛ برای کندل بدون سایه دقیقاً ۱ می‌شود، بدون هیچ عدد قراردادی)، `upper_wick_ratio`, `lower_wick_ratio` |
 | مقایسهٔ کندل‌های اخیر | `candle_size_ratio_prev{1,2,3}`, `candle_color_match_prev{1,2,3}` |
 | نوسان | `volatility_ratio_short_long` (انبساط/انقباض نوسان: ATR کوتاه به ATR بلند) |
 | شکست ساختار | `broke_prev_candle_high/low`, `broke_recent_swing_high/low` |
