@@ -48,11 +48,49 @@ python main.py
 config.py                     تنظیمات مرکزی (تایم‌فریم، مسیر فایل‌ها و ...)
 main.py                       نقطهٔ ورود؛ هماهنگ‌کنندهٔ asyncio بین بخش‌ها
 src/browser_session.py        بخش ۱: مرورگر + شنود WebSocket
-src/feature_engineering.py    بخش ۲: بافر تیک، سرعت/شتاب، ویژگی‌های کندل
+src/feature_engineering.py    بخش ۲: بافر تیک (سرعت/شتاب درصدی)، Stall/Spike، ویژگی‌های شکلی کندل
+src/market_structure.py       بخش ۲ (تکمیلی): سوئینگ، لگ، حمایت/مقاومت، روند، شکل نسبی چارت
 src/state_tracker.py          بخش ۳: تاریخچهٔ Win/Loss و وین‌ریت لحظه‌ای
 src/data_logger.py            بخش ۴: ثبت معامله، لیبل‌گذاری، ذخیره در CSV/SQLite
 data/                         خروجی‌های تولیدشده (CSV، SQLite، لاگ خام) — در گیت ignore شده‌اند
 ```
+
+## فلسفهٔ داده: همه‌چیز نسبی است، نه مقدار خام قیمت
+
+مدل باید دقیقاً مثل خود شما با نگاه‌کردن به **شکل** چارت تصمیم بگیرد، نه با
+حفظ‌کردن اعداد قیمت یک نماد خاص. به همین دلیل **هیچ ستونی در دیتاست مقدار خام
+قیمت ندارد** (به‌جز ستون‌های `meta_*` که فقط برای ردیابی/دیباگ‌اند و نباید به
+مدل داده شوند). ویژگی‌های نسبی که در هر ردیف ثبت می‌شوند:
+
+| گروه | ویژگی‌ها |
+|---|---|
+| سرعت/شتاب | `velocity_pct`, `acceleration_pct` و نسخه‌های هموارشدهٔ آن‌ها (درصد تغییر قیمت بر ثانیه، نه مقدار مطلق) |
+| حرکت ناگهانی | `spike_zscore` (آیا حرکت لحظه‌ای نسبت به نوسان عادی اخیر غیرعادی است) |
+| موقعیت در کندل جاری | `price_position_in_candle`, `distance_from_open_ratio` |
+| توقف نشانگر | `stall_count_in_candle`, `last_stall_position_in_candle` |
+| هم‌جهتی تیک با کندل | `tick_vs_candle_alignment` (آیا حرکت ۳ ثانیه‌ای هم‌جهت روند کندل دقیقه‌ای است یا در حال واگرایی) |
+| شکل کندل جاری/قبلی | `candle_curr_*`, `candle_prev1_*` (نسبت بدنه به سایه، نسبت سایهٔ بالا/پایین) |
+| مقایسهٔ کندل‌های اخیر | `candle_size_ratio_prev{1,2,3}`, `candle_color_match_prev{1,2,3}` |
+| نوسان | `volatility_ratio_short_long` (انبساط/انقباض نوسان: ATR کوتاه به ATR بلند) |
+| شکست ساختار | `broke_prev_candle_high/low`, `broke_recent_swing_high/low` |
+| حمایت/مقاومت | `dist_to_resistance_atr`, `dist_to_support_atr` (فاصله نرمال‌شده با ATR) |
+| لگ (Leg) | `leg_direction`, `leg_length_seconds`, `leg_extension_ratio`, `fib_retracement_of_prev_leg` |
+| روند | `trend_regime` (۱=صعودی، ۰=رنج، ۱-=نزولی)، `trend_regime_ready` |
+| استریک | `candle_color_streak` |
+| عدم‌تقارن سایه | `wick_asymmetry_current`, `wick_asymmetry_relative` |
+| شکل کلی چارت | `chart_shape_json` — رشتهٔ JSON شامل OHLC نرمال‌شده (۰ تا ۱) برای ۲۰ کندل اخیر، برای یادگیری الگوهای بزرگ (مثلث، پرچم، دوقلو و ...) بدون نیاز به تعریف دستی هر الگو |
+| تاریخچهٔ معاملات | `recent_result_1..3`, `rolling_winrate`, `overall_winrate` |
+
+هنگام آموزش مدل، ستون‌های `direction` (ورودی معتبر: تصمیم شما) و `result`
+(لیبل نهایی: خروجی) را نگه دارید و همهٔ ستون‌های `meta_*` را قبل از آموزش حذف
+کنید. برای استفاده از `chart_shape_json` در مدل، آن را با
+`json.loads(row["chart_shape_json"])` به لیستی از دیکشنری‌ها (`o,h,l,c,bullish`
+برای هر کندل) تبدیل کنید.
+
+نکته: چون سوئینگ‌ها فقط با یک کندل تأخیر تأیید می‌شوند (ماهیت ذاتی تشخیص
+سوئینگ)، ستون‌های مرتبط با ساختار (`leg_*`, `dist_to_*`, `trend_regime`) در
+اولین دقایق اجرای اسکریپت مقدار `None`/غیرقابل‌اتکا خواهند داشت تا سوئینگ کافی
+جمع شود؛ از ستون `trend_regime_ready` برای فیلتر کردن ردیف‌های ناقص استفاده کنید.
 
 ## محدودیت‌ها و هشدارها
 
