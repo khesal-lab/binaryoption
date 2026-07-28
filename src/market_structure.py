@@ -233,6 +233,45 @@ class MarketStructureTracker:
         rng = abs(last_high[-1].price - last_low[-1].price)
         return rng if rng > 0 else None
 
+    def _windowed_fallback_swing(self, current_candle: Optional[Candle]) -> Optional[dict]:
+        """
+        وقتی هنوز هیچ سوئینگ فرکتالی تأیید نشده (مثلاً چند دقیقهٔ اول اجرای
+        اسکریپت)، بازهم دقیقاً همان‌طور که یک تریدر به همین پنجرهٔ کوچک روی
+        صفحه نگاه می‌کند و های/لوی همان‌جا را به‌عنوان مرجع می‌گیرد، این تابع
+        های/لوی «پنجرهٔ دیداری» (همان پنجرهٔ chart_shape) را به‌عنوان یک
+        سوئینگ/حمایت-مقاومت تقریبی برمی‌گرداند — تا هیچ‌وقت این ویژگی‌ها کاملاً
+        خالی نمانند. خروجی شامل های/لوی پنجره و این‌که کدام‌یک دیرتر لمس شده
+        (که به‌عنوان لنگرِ لگ فعلی در نظر گرفته می‌شود) است.
+        """
+        closed = list(self.candles)
+        window = closed[-(self.chart_window - 1):] if current_candle else closed[-self.chart_window:]
+        if current_candle:
+            window = window + [current_candle]
+        if not window:
+            return None
+
+        window_high = max(c.high for c in window)
+        window_low = min(c.low for c in window)
+        if window_high <= window_low:
+            return None
+
+        # آخرین کندلی که به های/لوی پنجره رسیده؛ هرکدام دیرتر بود، لنگرِ لگ فعلی است
+        high_touch_idx = max(i for i, c in enumerate(window) if c.high == window_high)
+        low_touch_idx = max(i for i, c in enumerate(window) if c.low == window_low)
+
+        if high_touch_idx >= low_touch_idx:
+            anchor_price, anchor_time = window_high, window[high_touch_idx].start_time
+        else:
+            anchor_price, anchor_time = window_low, window[low_touch_idx].start_time
+
+        return {
+            "range": window_high - window_low,
+            "window_high": window_high,
+            "window_low": window_low,
+            "anchor_price": anchor_price,
+            "anchor_time": anchor_time,
+        }
+
     # -- خروجی اصلی: ویژگی‌های ساختاری در لحظه --------------------------------
     def get_features(
         self,
@@ -242,12 +281,25 @@ class MarketStructureTracker:
     ) -> dict:
         features: dict = {}
 
-        # --- آیا اصلاً سوئینگی شناسایی شده؟ (پیش‌نیاز همهٔ ویژگی‌های زیر) ---
+        # --- آیا اصلاً سوئینگی شناسایی شده؟ اگر نه، از یک لایهٔ جایگزین
+        # (های/لوی همان پنجرهٔ دیداری) استفاده می‌کنیم تا این ویژگی‌ها هیچ‌وقت
+        # کاملاً خالی نمانند — دقیقاً مثل این‌که یک تریدر همیشه، حتی در همان
+        # چند کندل اول، یک سوئینگ/لگ تقریبی روی صفحه می‌بیند. ---
         features["has_swing_data"] = int(bool(self.swing_points))
         swing_range = self._swing_range()
-        features["swing_range_defined"] = int(swing_range is not None)
 
-        # نسبت محدودهٔ کندل جاری به محدودهٔ سوئینگ: این کندل چه سهمی از کل نوسان دارد
+        fallback = None
+        using_fallback = False
+        if swing_range is None:
+            fallback = self._windowed_fallback_swing(current_candle)
+            if fallback:
+                swing_range = fallback["range"]
+                using_fallback = True
+
+        features["swing_range_defined"] = int(swing_range is not None)
+        features["swing_data_is_fallback"] = int(using_fallback)
+
+        # نسبت محدودهٔ کندل جاری به محدودهٔ سوئینگ (واقعی یا جایگزین): این کندل چه سهمی از کل نوسان دارد
         current_candle_range = current_candle.range if current_candle else None
         features["candle_range_to_swing_range_ratio"] = (
             current_candle_range / swing_range
@@ -279,6 +331,13 @@ class MarketStructureTracker:
         nearest_resistance = min(resistances) if resistances else None
         nearest_support = max(supports) if supports else None
 
+        # اگر هنوز سوئینگ رسمی نداریم، های/لوی پنجرهٔ دیداری را به‌عنوان
+        # مقاومت/حمایت تقریبی در نظر می‌گیریم (همان لایهٔ جایگزین بالا)
+        if nearest_resistance is None and fallback and current_price < fallback["window_high"]:
+            nearest_resistance = fallback["window_high"]
+        if nearest_support is None and fallback and current_price > fallback["window_low"]:
+            nearest_support = fallback["window_low"]
+
         atr_ref = atr_long or atr_short
         features["dist_to_resistance_atr"] = (
             (nearest_resistance - current_price) / atr_ref if (nearest_resistance is not None and atr_ref) else None
@@ -286,15 +345,30 @@ class MarketStructureTracker:
         features["dist_to_support_atr"] = (
             (current_price - nearest_support) / atr_ref if (nearest_support is not None and atr_ref) else None
         )
-        features["broke_recent_swing_high"] = int(
-            bool(recent_highs) and current_price > recent_highs[-1].price
-        )
-        features["broke_recent_swing_low"] = int(
-            bool(recent_lows) and current_price < recent_lows[-1].price
-        )
+        if recent_highs:
+            features["broke_recent_swing_high"] = int(current_price > recent_highs[-1].price)
+        elif fallback:
+            features["broke_recent_swing_high"] = int(current_price > fallback["window_high"])
+        else:
+            features["broke_recent_swing_high"] = 0
+        if recent_lows:
+            features["broke_recent_swing_low"] = int(current_price < recent_lows[-1].price)
+        elif fallback:
+            features["broke_recent_swing_low"] = int(current_price < fallback["window_low"])
+        else:
+            features["broke_recent_swing_low"] = 0
 
         # --- لگ فعلی و رژیم روند ---
         current_leg = self._current_leg(current_price)
+        if current_leg is None and fallback:
+            # لگ جایگزین: از آخرین لبه‌ای که پنجرهٔ دیداری لمس کرده (های یا لو،
+            # هرکدام دیرتر بود) تا لحظهٔ فعلی
+            fallback_direction = "up" if current_price >= fallback["anchor_price"] else "down"
+            current_leg = Leg(
+                start_price=fallback["anchor_price"],
+                start_time=fallback["anchor_time"],
+                direction=fallback_direction,
+            )
         if current_leg:
             features["leg_direction"] = 1 if current_leg.direction == "up" else -1
             # طول لگ برحسب «تعداد کندل» به‌جای ثانیهٔ خام، تا مستقل از تایم‌فریم/سرعت اجرا باشد
