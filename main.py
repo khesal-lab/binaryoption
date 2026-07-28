@@ -24,6 +24,7 @@ state_tracker, data_logger, trade_click_listener) را با asyncio.gather به�
 from __future__ import annotations
 
 import asyncio
+import time
 
 import config
 from src.browser_session import (
@@ -32,11 +33,13 @@ from src.browser_session import (
     launch_browser_and_wait_for_login,
     reconnect_page_if_needed,
 )
-from src.feature_engineering import TickBuffer, TickHistory, CandleAggregator
+from src.feature_engineering import TickBuffer, TickHistory, CandleAggregator, build_feature_snapshot
 from src.market_structure import MarketStructureTracker
 from src.state_tracker import TradeHistory
 from src.data_logger import DataLogger
 from src.trade_click_listener import attach_trade_button_listeners
+from src.trade_executor import click_trade_button
+from src.live_predictor import LivePredictor
 
 
 async def tick_consumer_task(
@@ -134,6 +137,63 @@ async def connection_watchdog_task(
                 await reconnect_page_if_needed(page)
 
 
+async def auto_trade_task(
+    page,
+    predictor: LivePredictor,
+    tick_buffer: TickBuffer,
+    tick_history: TickHistory,
+    candle_aggregator: CandleAggregator,
+    market_structure: MarketStructureTracker,
+    trade_history: TradeHistory,
+    click_source_holder: dict,
+    stop_event: asyncio.Event,
+) -> None:
+    """
+    Task اختیاری: فقط وقتی config.AUTO_TRADE_ENABLED فعال و فایل مدل موجود
+    باشد اجرا می‌شود. با فاصلهٔ کوتاه (poll_interval) وضعیت لحظه‌ای بازار را
+    می‌سازد، از مدل برای هر دو جهت (CALL/PUT) احتمال برد می‌گیرد، و اگر
+    بهترین جهت از آستانهٔ اطمینان config.AUTO_TRADE_CONFIDENCE_THRESHOLD عبور
+    کرد، خودش روی همان دکمهٔ واقعی BUY/SELL کلیک می‌کند (src/trade_executor).
+    برای این‌که ثبت نتیجه با معاملهٔ قبلی قاطی نشود، بعد از هر معاملهٔ خودکار
+    حداقل config.AUTO_TRADE_COOLDOWN_SECONDS ثانیه صبر می‌کند.
+    """
+    poll_interval = 0.2
+    last_trade_monotonic = 0.0
+
+    print(f"[AutoTrade] حالت معاملهٔ خودکار فعال شد | آستانهٔ اطمینان: "
+          f"{config.AUTO_TRADE_CONFIDENCE_THRESHOLD:.0%} | فاصلهٔ حداقلی بین معاملات: "
+          f"{config.AUTO_TRADE_COOLDOWN_SECONDS} ثانیه")
+
+    while not stop_event.is_set():
+        await asyncio.sleep(poll_interval)
+
+        now = time.monotonic()
+        if now - last_trade_monotonic < config.AUTO_TRADE_COOLDOWN_SECONDS:
+            continue
+
+        latest = tick_buffer.latest()
+        if latest is None or not tick_buffer.is_ready():
+            continue
+
+        snapshot = build_feature_snapshot(tick_buffer, tick_history, candle_aggregator)
+        snapshot.update(
+            market_structure.get_features(latest.price, latest.timestamp, candle_aggregator.current)
+        )
+        snapshot.update(trade_history.as_feature_dict())
+
+        direction, confidence = predictor.predict_direction(snapshot)
+        if direction is None or confidence < config.AUTO_TRADE_CONFIDENCE_THRESHOLD:
+            continue
+
+        click_source_holder["source"] = "bot"
+        clicked = await click_trade_button(page, direction)
+        if clicked:
+            last_trade_monotonic = now
+            print(f"[AutoTrade] معاملهٔ خودکار {direction} ثبت شد (اطمینان مدل: {confidence:.1%})")
+        else:
+            click_source_holder["source"] = "manual"
+
+
 async def main() -> None:
     tick_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
 
@@ -154,12 +214,33 @@ async def main() -> None:
         tick_buffer, tick_history, candle_aggregator, market_structure, trade_history, deal_buffer
     )
 
+    # وقتی معاملهٔ خودکار (auto_trade_task) دکمه را برنامه‌ای کلیک می‌کند، درست
+    # قبل از کلیک این مقدار را به "bot" تغییر می‌دهد؛ شنوندهٔ کلیک زیر که هم
+    # روی کلیک دستی کاربر و هم روی همین کلیک برنامه‌ای صدا زده می‌شود، این
+    # مقدار را می‌خواند تا بداند این معامله را با کدام برچسب (manual/bot) ثبت کند.
+    click_source_holder = {"source": "manual"}
+
+    def _make_on_click(direction: str):
+        def _callback() -> None:
+            source = click_source_holder["source"]
+            click_source_holder["source"] = "manual"
+            data_logger.capture_entry(direction, source=source)
+        return _callback
+
     # شنود کلیک واقعی روی دکمه‌های BUY/SELL خودِ پلتفرم — روش اصلی ثبت معامله
     await attach_trade_button_listeners(
         page,
-        on_call_click=lambda: data_logger.capture_entry("CALL"),
-        on_put_click=lambda: data_logger.capture_entry("PUT"),
+        on_call_click=_make_on_click("CALL"),
+        on_put_click=_make_on_click("PUT"),
     )
+
+    predictor: LivePredictor | None = None
+    if config.AUTO_TRADE_ENABLED:
+        if config.MODEL_JSON_PATH.exists() and config.MODEL_FEATURES_PATH.exists():
+            predictor = LivePredictor(config.MODEL_JSON_PATH, config.MODEL_FEATURES_PATH)
+        else:
+            print(f"[Main] AUTO_TRADE_ENABLED فعال است ولی فایل مدل پیدا نشد "
+                  f"({config.MODEL_JSON_PATH})؛ حالت معاملهٔ خودکار غیرفعال می‌ماند.")
 
     stop_event = asyncio.Event()
 
@@ -170,6 +251,16 @@ async def main() -> None:
         asyncio.create_task(hotkey_listener_task(data_logger, stop_event)),
         asyncio.create_task(connection_watchdog_task(ws_listener, page, stop_event)),
     ]
+
+    if predictor is not None:
+        tasks.append(
+            asyncio.create_task(
+                auto_trade_task(
+                    page, predictor, tick_buffer, tick_history, candle_aggregator,
+                    market_structure, trade_history, click_source_holder, stop_event,
+                )
+            )
+        )
 
     try:
         # منتظر می‌مانیم تا کاربر دستور خروج ('q') بدهد
