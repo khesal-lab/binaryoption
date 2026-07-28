@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.browser_profile/
+data/*.csv
+data/*.sqlite3
+data/*.log
+!data/.gitkeep
+.venv/
+venv/
