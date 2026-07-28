@@ -28,7 +28,8 @@ from src.browser_session import (
     launch_browser_and_wait_for_login,
     reconnect_page_if_needed,
 )
-from src.feature_engineering import TickBuffer, CandleAggregator, build_feature_snapshot
+from src.feature_engineering import TickBuffer, TickHistory, CandleAggregator
+from src.market_structure import MarketStructureTracker
 from src.state_tracker import TradeHistory
 from src.data_logger import DataLogger
 
@@ -36,16 +37,23 @@ from src.data_logger import DataLogger
 async def tick_consumer_task(
     tick_queue: asyncio.Queue,
     tick_buffer: TickBuffer,
+    tick_history: TickHistory,
     candle_aggregator: CandleAggregator,
+    market_structure: MarketStructureTracker,
 ) -> None:
     """
-    Task 1: پیوسته از صف تیک‌های خام می‌خواند، بافر و کندل‌ساز را به‌روز می‌کند.
+    Task 1: پیوسته از صف تیک‌های خام می‌خواند، بافرها و کندل‌ساز را به‌روز می‌کند.
+    هر بار که یک کندل یک‌دقیقه‌ای بسته شود، همان کندل به MarketStructureTracker
+    داده می‌شود تا سوئینگ/لگ/حمایت‌مقاومت/روند را به‌روزرسانی کند.
     این حلقه باید همیشه سریع باشد تا هیچ تأخیری روی داده‌های real-time نیفتد.
     """
     while True:
         tick = await tick_queue.get()
         tick_buffer.add(tick)
-        candle_aggregator.add_tick(tick)
+        tick_history.add(tick)
+        closed_candle = candle_aggregator.add_tick(tick)
+        if closed_candle is not None:
+            market_structure.ingest_closed_candle(closed_candle)
 
 
 async def hotkey_listener_task(data_logger: DataLogger, stop_event: asyncio.Event) -> None:
@@ -105,7 +113,9 @@ async def main() -> None:
     tick_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
 
     tick_buffer = TickBuffer()
+    tick_history = TickHistory()
     candle_aggregator = CandleAggregator()
+    market_structure = MarketStructureTracker()
     trade_history = TradeHistory()
 
     context, page = await launch_browser_and_wait_for_login()
@@ -113,12 +123,14 @@ async def main() -> None:
     ws_listener = WebSocketListener(tick_queue)
     ws_listener.attach(page)
 
-    data_logger = DataLogger(tick_buffer, candle_aggregator, trade_history)
+    data_logger = DataLogger(tick_buffer, tick_history, candle_aggregator, market_structure, trade_history)
 
     stop_event = asyncio.Event()
 
     tasks = [
-        asyncio.create_task(tick_consumer_task(tick_queue, tick_buffer, candle_aggregator)),
+        asyncio.create_task(
+            tick_consumer_task(tick_queue, tick_buffer, tick_history, candle_aggregator, market_structure)
+        ),
         asyncio.create_task(hotkey_listener_task(data_logger, stop_event)),
         asyncio.create_task(connection_watchdog_task(ws_listener, page, stop_event)),
     ]
