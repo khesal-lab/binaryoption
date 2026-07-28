@@ -49,11 +49,29 @@ python main.py
 2. نمونه‌های واقعی پیام‌ها را در آن فایل ببینید.
 3. الگوی `_looks_like_tick_row` / `extract_ticks_from_payload` را با فرمت واقعی هماهنگ کنید.
 
+## ابزار تشخیصی: پیدا کردن سیگنال نتیجهٔ معامله
+
+اگر ستون `result_source` بیشتر معاملات `tick_fallback` بود (نه `ws_deal`)،
+یعنی هنوز فرمت پیام «نتیجهٔ معامله» پلتفرم شناسایی نشده. برای پیدا کردنش، یک
+اسکریپت مستقل و جداگانه هست که هر نوع دادهٔ ممکن (نه فقط WebSocket، بلکه
+درخواست‌های شبکه XHR/Fetch و پیام‌های console) را خام ثبت می‌کند:
+
+```bash
+python capture_diagnostics.py
+```
+
+مثل `main.py` دستی لاگین کنید، چند معامله (ترکیبی از چند برد و چند باخت)
+انجام دهید، سپس `q` + Enter بزنید. فایل‌های `data/diagnostics/ws_frames.log`،
+`network.log` و `console.log` ساخته می‌شوند — این‌ها را بفرستید تا فرمت واقعی
+نتیجهٔ معامله پیدا و `extract_deal_candidates` / `_interpret_deal_candidate`
+با آن هماهنگ شود.
+
 ## ساختار پروژه
 
 ```
 config.py                     تنظیمات مرکزی (تایم‌فریم، مسیر فایل‌ها و ...)
 main.py                       نقطهٔ ورود؛ هماهنگ‌کنندهٔ asyncio بین بخش‌ها
+capture_diagnostics.py        ابزار تشخیصی مستقل: ثبت خام WS/Network/Console برای پیدا کردن سیگنال نتیجهٔ معامله
 src/browser_session.py        بخش ۱: مرورگر + شنود WebSocket
 src/feature_engineering.py    بخش ۲: بافر تیک (سرعت/شتاب درصدی)، Stall/Spike، ویژگی‌های شکلی کندل
 src/market_structure.py       بخش ۲ (تکمیلی): سوئینگ، لگ، حمایت/مقاومت، روند، شکل نسبی چارت
