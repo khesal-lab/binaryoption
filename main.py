@@ -106,8 +106,21 @@ async def connection_watchdog_task(
     Task 3: هر چند ثانیه یک‌بار بررسی می‌کند که آیا WebSocket فعالی وجود دارد.
     اگر برای مدتی طولانی هیچ اتصالی وجود نداشت (مثلاً به‌خاطر قطعی اینترنت)،
     صفحه را Reload می‌کند تا اتصال از نو برقرار شود.
+
+    نکته: درست بعد از لاگین دستی، برقراری اولین اتصال WebSocket طبیعتاً چند
+    ثانیه طول می‌کشد (صفحه هنوز کامل بارگذاری نشده). قبل از این‌که اصلاً شروع
+    به نظارت کنیم، به همین اتصال اول یک مهلت جداگانه (initial_grace_seconds)
+    می‌دهیم — وگرنه همین تأخیر طبیعی را اشتباهی «قطعی» تشخیص می‌دهد و صفحه را
+    بی‌دلیل Reload می‌کند (دقیقاً همان رفتاری که ممکن است دیده باشید).
     """
+    initial_grace_seconds = config.INITIAL_CONNECTION_GRACE_SECONDS
     disconnect_grace_seconds = 15
+
+    try:
+        await asyncio.wait_for(ws_listener.connected_event.wait(), timeout=initial_grace_seconds)
+    except asyncio.TimeoutError:
+        pass  # اگر واقعاً بعد از این مدت هم وصل نشد، حلقهٔ زیر خودش دوباره تلاش می‌کند
+
     while not stop_event.is_set():
         await asyncio.sleep(5)
         if not ws_listener.connected_event.is_set():
