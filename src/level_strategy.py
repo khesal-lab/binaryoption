@@ -4,19 +4,22 @@
 
 استراتژی: کندل جاری در حال شکل‌گیری معیار است.
 
-داخل این کندل، قیمت بین سقف (HIGH) و کف (LOW) نوسان می‌کند و در نقاطی
-متوقف/برمی‌گردد (اکسترمم‌های محلی = نقاط توقف). از میان این نقاط دو سطح
-کلیدی انتخاب می‌شوند:
+داخل این کندل، نقاط توقف (اکسترمم‌های محلی) شناسایی می‌شوند. دو سطح
+کلیدی انتخاب می‌شوند: نزدیک‌ترین به سقف (HIGH) و نزدیک‌ترین به کف (LOW).
+وقتی قیمت یکی از این سطوح را لمس کرد، جهت معامله به این صورت تعیین می‌شود:
 
-    • نزدیک‌ترین نقطه توقف به سقف کندل جاری  ->  PUT
-      (نزدیک مقاومت؛ هنگامی که قیمت این سطح را لمس کند)
+    حالت ۱ — تمام نقاط توقف زیر اپن (ناحیه نزولی):
+        هر دو سطح -> PUT (موافق جهت نزول)
 
-    • نزدیک‌ترین نقطه توقف به کف کندل جاری  ->  CALL
-      (نزدیک حمایت؛ هنگامی که قیمت این سطح را لمس کند)
+    حالت ۲ — تمام نقاط توقف بالای اپن (ناحیه صعودی):
+        هر دو سطح -> CALL (موافق جهت صعود)
+
+    حالت ۳ — نقاط توقف هم بالای اپن هم پایین اپن (نوسان دو طرف اپن):
+        نزدیک‌ترین به سقف -> PUT  (نزدیک مقاومت)
+        نزدیک‌ترین به کف  -> CALL (نزدیک حمایت)
 
 هر سطح فقط یک‌بار در طول عمر کندل جاری فعال می‌شود. با بسته‌شدن کندل
-و شروع کندل جدید، سطوح پاک شده و از نو از روی داده‌های کندل جدید
-محاسبه می‌شوند.
+و شروع کندل جدید، سطوح پاک شده و از نو محاسبه می‌شوند.
 """
 
 from __future__ import annotations
@@ -88,30 +91,51 @@ class LevelStrategyTracker:
             return None
 
         tolerance = candle_range * self.match_tolerance_ratio
+        open_price = current_candle.open
 
         def to_bucket(price: float) -> int:
             return round(price / tolerance) if tolerance > 0 else round(price * 1_000_000)
 
-        # نزدیک‌ترین نقطه توقف به سقف کندل -> نزدیک مقاومت -> PUT
-        near_high = min(extrema, key=lambda p: abs(current_candle.high - p))
-        # نزدیک‌ترین نقطه توقف به کف کندل -> نزدیک حمایت -> CALL
-        near_low = min(extrema, key=lambda p: abs(p - current_candle.low))
+        # تعیین ناحیه نوسان نسبت به اپن
+        all_above_open = all(p > open_price for p in extrema)
+        all_below_open = all(p < open_price for p in extrema)
+        spans_open = not all_above_open and not all_below_open
 
-        key_put = ("near_high", to_bucket(near_high))
-        key_call = ("near_low", to_bucket(near_low))
-
-        # لمس سطح نزدیک سقف -> PUT
-        if key_put not in self._traded_levels:
-            if (prev_tick.price < near_high <= latest_tick.price or
-                    prev_tick.price > near_high >= latest_tick.price):
-                self._traded_levels.append(key_put)
+        def direction_for(near_high_stall: bool) -> str:
+            """
+            جهت معامله را بر اساس موقعیت نوسان نسبت به اپن برمی‌گرداند.
+            near_high_stall=True  -> سطح نزدیک سقف فعال شده
+            near_high_stall=False -> سطح نزدیک کف فعال شده
+            """
+            if spans_open:
+                # نوسان هر دو طرف اپن: سقف=مقاومت(PUT)، کف=حمایت(CALL)
+                return "PUT" if near_high_stall else "CALL"
+            elif all_above_open:
+                # همه نقاط بالای اپن: ناحیه صعودی -> CALL
+                return "CALL"
+            else:
+                # همه نقاط پایین اپن: ناحیه نزولی -> PUT
                 return "PUT"
 
-        # لمس سطح نزدیک کف -> CALL
-        if key_call not in self._traded_levels:
+        # نزدیک‌ترین نقطه توقف به سقف و کف کندل
+        near_high = min(extrema, key=lambda p: abs(current_candle.high - p))
+        near_low = min(extrema, key=lambda p: abs(p - current_candle.low))
+
+        key_high = ("near_high", to_bucket(near_high))
+        key_low = ("near_low", to_bucket(near_low))
+
+        # لمس سطح نزدیک سقف
+        if key_high not in self._traded_levels:
+            if (prev_tick.price < near_high <= latest_tick.price or
+                    prev_tick.price > near_high >= latest_tick.price):
+                self._traded_levels.append(key_high)
+                return direction_for(near_high_stall=True)
+
+        # لمس سطح نزدیک کف
+        if key_low not in self._traded_levels:
             if (prev_tick.price < near_low <= latest_tick.price or
                     prev_tick.price > near_low >= latest_tick.price):
-                self._traded_levels.append(key_call)
-                return "CALL"
+                self._traded_levels.append(key_low)
+                return direction_for(near_high_stall=False)
 
         return None
