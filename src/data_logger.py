@@ -187,7 +187,7 @@ class DataLogger:
             source=source,
         )
 
-        source_tag = " [ربات]" if source == "bot" else ""
+        source_tag = f" [{source}]" if source != "manual" else ""
         print(f"[DataLogger] معامله{source_tag} {direction} ثبت شد. "
               f"در حال انتظار برای نتیجه ({self.expiry_seconds} ثانیه)...")
 
@@ -220,7 +220,7 @@ class DataLogger:
                 result_source = "ws_deal"
 
         self.trade_history.add_result(result)
-        if pending.source == "bot":
+        if pending.source != "manual":
             self.bot_trade_history.add_result(result)
 
         row = dict(pending.feature_snapshot)
@@ -248,11 +248,11 @@ class DataLogger:
         progress = f" | مجموع کل معاملات ثبت‌شده: {lifetime_total}"
         if target:
             progress += f" از حدود {target} (نمونهٔ اولیهٔ پیشنهادی) — {min(100, lifetime_total / target * 100):.0f}٪"
-        source_tag = " [ربات]" if pending.source == "bot" else ""
+        source_tag = f" [{pending.source}]" if pending.source != "manual" else ""
         print(f"[DataLogger] نتیجهٔ معامله{source_tag}: {outcome_text} (منبع: {result_source}) | "
               f"وین‌ریت لحظه‌ای: {self.trade_history.get_rolling_winrate():.2%}{progress}")
-        if pending.source == "bot":
-            print(f"[DataLogger] وین‌ریت زندهٔ ربات (auto-trade): "
+        if pending.source != "manual":
+            print(f"[DataLogger] وین‌ریت زندهٔ ربات ({pending.source}): "
                   f"{self.bot_trade_history.get_rolling_winrate():.2%} "
                   f"روی {self.bot_trade_history.total_trades()} معاملهٔ خودکار")
 
