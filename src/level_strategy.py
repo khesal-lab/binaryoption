@@ -2,25 +2,24 @@
 استراتژی ثابت (Rule-Based) برای ربات مخصوص جمع‌آوری داده
 ================================================================
 
-بر خلاف ربات معامله‌گر مبتنی بر مدل (src/live_predictor.py) که تصمیمش را از
-یک مدل آموزش‌دیده می‌گیرد، این ماژول یک استراتژی کاملاً ثابت و از پیش
-مشخص را پیاده می‌کند - هدف فقط جمع‌آوری دادهٔ متنوع و برچسب‌خورده (توسط خودِ
-پلتفرم) است، نه سودآوری زنده. وین‌ریت این معاملات مهم نیست؛ مهم این است که
-دقیقاً در نقاطی که یک تریدر معمولاً روی آن‌ها تصمیم می‌گیرد (تست حمایت/
-مقاومت) نمونه با نتیجهٔ واقعی جمع شود.
+استراتژی: کندل جاری در حال شکل‌گیری معیار است.
 
-دو نوع سطح شناسایی و تست می‌شود:
+داخل این کندل، نقاط توقف (اکسترمم‌های محلی) شناسایی می‌شوند. دو سطح
+کلیدی انتخاب می‌شوند: نزدیک‌ترین به سقف (HIGH) و نزدیک‌ترین به کف (LOW).
+وقتی قیمت یکی از این سطوح را لمس کرد، جهت معامله به این صورت تعیین می‌شود:
 
-    ۱. کف/سقف کندلِ قبلیِ بسته‌شده: سقف = مقاومت (وقتی قیمت به آن می‌رسد،
-       فرض بازگشت به پایین -> PUT)، کف = حمایت (وقتی قیمت به آن می‌رسد،
-       فرض بازگشت به بالا -> CALL). هر سطح فقط یک‌بار در طول عمر همان کندل
-       تست می‌شود (وقتی کندل جدید شروع شود، دوباره قابل تست است).
+    حالت ۱ — تمام نقاط توقف زیر اپن (ناحیه نزولی):
+        هر دو سطح -> PUT (موافق جهت نزول)
 
-    ۲. نقاطی داخل کندلِ در حال شکل‌گیری که قیمت بیش از یک‌بار در آن‌جا متوقف/
-       برگشته (یعنی یک اکسترمم محلی که تقریباً هم‌قیمت با یک اکسترمم قبلیِ
-       هم‌نوع است) - این‌ها هم مثل مقاومت (اگر قله باشد -> PUT) یا حمایت
-       (اگر دره باشد -> CALL) در نظر گرفته می‌شوند؛ هر سطح فقط یک‌بار تست
-       می‌شود.
+    حالت ۲ — تمام نقاط توقف بالای اپن (ناحیه صعودی):
+        هر دو سطح -> CALL (موافق جهت صعود)
+
+    حالت ۳ — نقاط توقف هم بالای اپن هم پایین اپن (نوسان دو طرف اپن):
+        نزدیک‌ترین به سقف -> PUT  (نزدیک مقاومت)
+        نزدیک‌ترین به کف  -> CALL (نزدیک حمایت)
+
+هر سطح فقط یک‌بار در طول عمر کندل جاری فعال می‌شود. با بسته‌شدن کندل
+و شروع کندل جدید، سطوح پاک شده و از نو محاسبه می‌شوند.
 """
 
 from __future__ import annotations
@@ -37,22 +36,11 @@ import config
 class LevelStrategyTracker:
     match_tolerance_ratio: float = config.LEVEL_STRATEGY_MATCH_TOLERANCE_RATIO
 
-    _prev_candle: Optional[Candle] = field(default=None, init=False)
-    _prev_high_tested: bool = field(default=False, init=False)
-    _prev_low_tested: bool = field(default=False, init=False)
-    _traded_intra_levels: list = field(default_factory=list, init=False)
+    _traded_levels: list = field(default_factory=list, init=False)
 
     def on_new_candle(self, closed_candle: Candle) -> None:
-        """
-        وقتی یک کندل بسته می‌شود صدا زده می‌شود: کندلِ تازه‌بسته‌شده مرجع
-        مقاومت/حمایت جدید می‌شود، و همهٔ پرچم‌های «تست‌شده» برای عمر کندل
-        تازه صفر می‌شوند (چون هم مرجع کندل قبلی عوض شده، هم کندل جاری تازه
-        شروع شده و اکسترمم‌های داخلی‌اش از نو ساخته می‌شوند).
-        """
-        self._prev_candle = closed_candle
-        self._prev_high_tested = False
-        self._prev_low_tested = False
-        self._traded_intra_levels = []
+        """با شروع کندل جدید، تمام سطوح معامله‌شده پاک می‌شوند."""
+        self._traded_levels = []
 
     def check_signal(
         self,
@@ -62,75 +50,92 @@ class LevelStrategyTracker:
         tick_history: TickHistory,
     ) -> Optional[str]:
         """
-        اگر لحظهٔ فعلی یکی از سطوح (مقاومت/حمایتِ کندل قبلی، یا یک نقطهٔ
-        تکرارشدهٔ توقف داخل کندل جاری) را تازه لمس کرده باشد، جهت معاملهٔ
-        متناظر ("CALL" یا "PUT") را برمی‌گرداند؛ در غیر این صورت None.
+        سطوح کلیدی کندل جاری را بررسی می‌کند. اگر قیمت به نزدیک‌ترین نقطه
+        توقف به سقف یا کف کندل برسد، سیگنال PUT یا CALL برمی‌گرداند.
         """
-        signal = self._check_prev_candle_levels(prev_tick, latest_tick)
-        if signal is not None:
-            return signal
-        return self._check_intra_candle_stall_levels(current_candle, tick_history)
+        return self._check_edge_stalls(prev_tick, latest_tick, current_candle, tick_history)
 
-    def _check_prev_candle_levels(self, prev_tick: Optional[Tick], latest_tick: Tick) -> Optional[str]:
-        if self._prev_candle is None or prev_tick is None:
+    def _check_edge_stalls(
+        self,
+        prev_tick: Optional[Tick],
+        latest_tick: Tick,
+        current_candle: Candle,
+        tick_history: TickHistory,
+    ) -> Optional[str]:
+        if prev_tick is None:
             return None
 
-        resistance = self._prev_candle.high
-        support = self._prev_candle.low
-
-        if not self._prev_high_tested and prev_tick.price < resistance <= latest_tick.price:
-            self._prev_high_tested = True
-            return "PUT"  # تست مقاومت -> فرض بازگشت به پایین
-
-        if not self._prev_low_tested and prev_tick.price > support >= latest_tick.price:
-            self._prev_low_tested = True
-            return "CALL"  # تست حمایت -> فرض بازگشت به بالا
-
-        return None
-
-    def _check_intra_candle_stall_levels(
-        self, current_candle: Candle, tick_history: TickHistory
-    ) -> Optional[str]:
         candle_range = current_candle.range
         if candle_range <= 0:
             return None
 
-        ticks_in_candle = [t for t in tick_history.buffer if t.timestamp >= current_candle.start_time]
+        ticks_in_candle = [
+            t for t in tick_history.buffer if t.timestamp >= current_candle.start_time
+        ]
         if len(ticks_in_candle) < 3:
             return None
 
-        # همهٔ اکسترمم‌های محلی (قله/دره) کندل جاری تا همین لحظه:
-        extrema: list[tuple[float, str]] = []
-        prev_direction = None
+        # استخراج همهٔ اکسترمم‌های محلی (نقاط توقف) داخل کندل جاری
+        extrema: list[float] = []
+        prev_dir: Optional[int] = None
         for i in range(1, len(ticks_in_candle)):
             diff = ticks_in_candle[i].price - ticks_in_candle[i - 1].price
             if diff == 0:
                 continue
-            direction = 1 if diff > 0 else -1
-            if prev_direction is not None and direction != prev_direction:
-                kind = "peak" if prev_direction == 1 else "trough"
-                extrema.append((ticks_in_candle[i - 1].price, kind))
-            prev_direction = direction
+            d = 1 if diff > 0 else -1
+            if prev_dir is not None and d != prev_dir:
+                extrema.append(ticks_in_candle[i - 1].price)
+            prev_dir = d
 
-        if len(extrema) < 2:
+        if not extrema:
             return None
 
         tolerance = candle_range * self.match_tolerance_ratio
-        latest_price, latest_kind = extrema[-1]
+        open_price = current_candle.open
 
-        for earlier_price, earlier_kind in extrema[:-1]:
-            if earlier_kind != latest_kind:
-                continue
-            if abs(latest_price - earlier_price) > tolerance:
-                continue
-            # این سطح قبلاً هم لمس شده - یعنی یک سطح تکرارشونده (حمایت/مقاومتِ
-            # داخلی) است. با یک کلید سطلی (Bucket) از تست دوبارهٔ همان سطح
-            # جلوگیری می‌کنیم.
-            bucket = round(latest_price / tolerance) if tolerance > 0 else round(latest_price, 8)
-            level_key = (latest_kind, bucket)
-            if level_key in self._traded_intra_levels:
-                continue
-            self._traded_intra_levels.append(level_key)
-            return "PUT" if latest_kind == "peak" else "CALL"
+        def to_bucket(price: float) -> int:
+            return round(price / tolerance) if tolerance > 0 else round(price * 1_000_000)
+
+        # تعیین ناحیه نوسان نسبت به اپن
+        all_above_open = all(p > open_price for p in extrema)
+        all_below_open = all(p < open_price for p in extrema)
+        spans_open = not all_above_open and not all_below_open
+
+        def direction_for(near_high_stall: bool) -> str:
+            """
+            جهت معامله را بر اساس موقعیت نوسان نسبت به اپن برمی‌گرداند.
+            near_high_stall=True  -> سطح نزدیک سقف فعال شده
+            near_high_stall=False -> سطح نزدیک کف فعال شده
+            """
+            if spans_open:
+                # نوسان هر دو طرف اپن: سقف=مقاومت(PUT)، کف=حمایت(CALL)
+                return "PUT" if near_high_stall else "CALL"
+            elif all_above_open:
+                # همه نقاط بالای اپن: ناحیه صعودی -> CALL
+                return "CALL"
+            else:
+                # همه نقاط پایین اپن: ناحیه نزولی -> PUT
+                return "PUT"
+
+        # نزدیک‌ترین نقطه توقف به سقف و کف کندل
+        near_high = min(extrema, key=lambda p: abs(current_candle.high - p))
+        near_low = min(extrema, key=lambda p: abs(p - current_candle.low))
+
+        key_high = ("near_high", to_bucket(near_high))
+        key_low = ("near_low", to_bucket(near_low))
+
+        # لمس سطح نزدیک سقف
+        if key_high not in self._traded_levels:
+            if (prev_tick.price < near_high <= latest_tick.price or
+                    prev_tick.price > near_high >= latest_tick.price):
+                self._traded_levels.append(key_high)
+                return direction_for(near_high_stall=True)
+
+        # لمس سطح نزدیک کف
+        if key_low not in self._traded_levels:
+            if (prev_tick.price < near_low <= latest_tick.price or
+                    prev_tick.price > near_low >= latest_tick.price):
+                self._traded_levels.append(key_low)
+                return direction_for(near_high_stall=False)
 
         return None
