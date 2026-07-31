@@ -95,6 +95,12 @@ MODEL_DIR.mkdir(exist_ok=True)
 MODEL_JSON_PATH = MODEL_DIR / "pocket_option_xgb_model.json"
 MODEL_FEATURES_PATH = MODEL_DIR / "feature_names.json"
 
+# مدل مقایسه‌ای که فقط با N فیچر مهم‌تر (طبق train/train_model.py) آموزش
+# می‌بیند - صرفاً برای مقایسه و درک نقش بقیهٔ فیچرها؛ در معاملهٔ زنده استفاده
+# نمی‌شود (main.py همیشه از MODEL_JSON_PATH بالا می‌خواند).
+MODEL_TOP_FEATURES_JSON_PATH = MODEL_DIR / "pocket_option_xgb_model_top_features.json"
+MODEL_TOP_FEATURES_LIST_PATH = MODEL_DIR / "feature_names_top_features.json"
+
 # حداقل احتمال بردی که مدل باید برای یک جهت پیش‌بینی کند تا معامله واقعاً
 # باز شود (بین ۰ و ۱). هرچه بالاتر، معاملات کمتر ولی مطمئن‌تر.
 AUTO_TRADE_CONFIDENCE_THRESHOLD = 0.70
