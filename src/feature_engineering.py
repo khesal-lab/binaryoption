@@ -246,6 +246,125 @@ class TickHistory:
 
         return {"stall_count_in_candle": stall_count, "last_stall_position_in_candle": position}
 
+    def _micro_swing_points(self) -> tuple[list[float], list[float]]:
+        """
+        نقاط اکسترمم محلی (نوسان ریز - تغییر جهت تیک‌به‌تیک) در کل بافر تیک‌ها
+        (نه فقط کندل جاری - نوسان ریز مستقل از مرز کندل است)، به‌علاوهٔ آخرین
+        تیک به‌عنوان انتهای لگِ در حال شکل‌گیری. خروجی: (prices, timestamps)
+        هم‌طول و به ترتیب زمانی.
+        """
+        ticks = list(self.buffer)
+        if len(ticks) < 2:
+            return [], []
+        prices: list[float] = []
+        times: list[float] = []
+        prev_direction: Optional[int] = None
+        for i in range(1, len(ticks)):
+            diff = ticks[i].price - ticks[i - 1].price
+            if diff == 0:
+                continue
+            direction = 1 if diff > 0 else -1
+            if prev_direction is not None and direction != prev_direction:
+                prices.append(ticks[i - 1].price)
+                times.append(ticks[i - 1].timestamp)
+            prev_direction = direction
+        prices.append(ticks[-1].price)
+        times.append(ticks[-1].timestamp)
+        return prices, times
+
+    def get_micro_swing_features(self) -> dict:
+        """
+        ویژگی‌های «نوسان ریز» (Micro-Swing) در سطح تیک: هر لگ فاصلهٔ بین دو
+        اکسترمم محلی متوالی است (یا از آخرین اکسترمم تا تیک جاری، برای لگِ در
+        حال شکل‌گیری). برای آخرین نوسان و پنجره‌های ۳/۵/۱۵ نوسان اخیر محاسبه
+        می‌شود:
+
+            - جهت (فقط آخرین نوسان): ۱=صعودی، -۱=نزولی، ۰=نامشخص
+            - سرعت: مجموع اندازهٔ حرکت (مسافت، مطلق و درصدی) تقسیم بر کل
+              زمان پنجره (درصد/ثانیه)
+            - شتاب: تفاضل سرعت لحظه‌ایِ لگِ آخر و لگِ اولِ پنجره، تقسیم بر کل
+              زمان پنجره
+            - جابجایی (Displacement): درصد تغییر خالص قیمت از ابتدای پنجره تا
+              الان (علامت‌دار)
+            - مسافت جابجایی (Distance): مجموع قدرمطلق درصد تغییر هر لگ داخل
+              پنجره (همیشه >= |جابجایی|، چون رفت‌وبرگشت‌ها را هم می‌شمارد)
+
+        اگر نوسان کافی در بافر نباشد، مقدار خنثی ۰.۰ برگردانده می‌شود.
+        """
+        prices, times = self._micro_swing_points()
+
+        legs: list[tuple[float, float]] = []
+        for i in range(1, len(prices)):
+            if prices[i - 1] == 0:
+                continue
+            pct = (prices[i] - prices[i - 1]) / prices[i - 1]
+            dt = times[i] - times[i - 1]
+            legs.append((pct, dt))
+
+        def leg_velocity(pct: float, dt: float) -> float:
+            return pct / dt if dt > 0 else 0.0
+
+        features: dict = {}
+
+        # -- آخرین نوسان ریز (۱ لگ) --------------------------------------
+        if legs:
+            last_pct, last_dt = legs[-1]
+            last_velocity = leg_velocity(last_pct, last_dt)
+            features["micro_swing_last_direction"] = 1 if last_pct > 0 else (-1 if last_pct < 0 else 0)
+            features["micro_swing_last_speed_pct"] = last_velocity
+            if len(legs) >= 2:
+                prev_pct, prev_dt = legs[-2]
+                prev_velocity = leg_velocity(prev_pct, prev_dt)
+                total_dt = last_dt + prev_dt
+                features["micro_swing_last_acceleration_pct"] = (
+                    (last_velocity - prev_velocity) / total_dt if total_dt > 0 else 0.0
+                )
+            else:
+                features["micro_swing_last_acceleration_pct"] = 0.0
+        else:
+            features["micro_swing_last_direction"] = 0
+            features["micro_swing_last_speed_pct"] = 0.0
+            features["micro_swing_last_acceleration_pct"] = 0.0
+
+        # -- پنجره‌های ۳/۵/۱۵ نوسان ریز اخیر ------------------------------
+        for window in (3, 5, 15):
+            prefix = f"micro_swing_last{window}"
+            window_legs = legs[-window:]
+            n = len(window_legs)
+            if n == 0:
+                features[f"{prefix}_speed_pct"] = 0.0
+                features[f"{prefix}_acceleration_pct"] = 0.0
+                features[f"{prefix}_displacement_pct"] = 0.0
+                features[f"{prefix}_distance_pct"] = 0.0
+                continue
+
+            distance_pct = sum(abs(pct) for pct, _ in window_legs)
+            total_dt = sum(dt for _, dt in window_legs)
+
+            # جابجایی خالص: ترکیب دقیق بازده‌های درصدی هر لگ (معادل ریاضی
+            # (قیمت پایانی - قیمت ابتدایی)/قیمت ابتدایی، بدون نیاز به قیمت خام)
+            displacement_pct = 1.0
+            for pct, _ in window_legs:
+                displacement_pct *= (1 + pct)
+            displacement_pct -= 1.0
+
+            features[f"{prefix}_displacement_pct"] = displacement_pct
+            features[f"{prefix}_distance_pct"] = distance_pct
+            features[f"{prefix}_speed_pct"] = (distance_pct / total_dt) if total_dt > 0 else 0.0
+
+            if n >= 2:
+                first_pct, first_dt = window_legs[0]
+                last_pct, last_dt = window_legs[-1]
+                first_velocity = leg_velocity(first_pct, first_dt)
+                last_velocity = leg_velocity(last_pct, last_dt)
+                features[f"{prefix}_acceleration_pct"] = (
+                    (last_velocity - first_velocity) / total_dt if total_dt > 0 else 0.0
+                )
+            else:
+                features[f"{prefix}_acceleration_pct"] = 0.0
+
+        return features
+
     def get_edge_behavior_features(
         self,
         candle_start_time: float,
@@ -486,6 +605,8 @@ def build_feature_snapshot(
         "recent_tick_velocities_json": json.dumps(tick_buffer.get_recent_velocities_pct()),
         "ticks_since_direction_change": tick_buffer.get_ticks_since_direction_change(),
     }
+    # سرعت/شتاب/جهت/جابجایی/مسافت نوسان‌های ریز اخیر (مستقل از مرز کندل):
+    snapshot.update(tick_history.get_micro_swing_features())
 
     current_candle = candle_aggregator.current
     if current_candle and latest:

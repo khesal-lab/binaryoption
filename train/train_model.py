@@ -38,9 +38,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import numpy as np
 import pandas as pd
 import xgboost as xgb
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import accuracy_score, classification_report
 
 import config
@@ -83,6 +84,39 @@ def main() -> None:
 
     X = flat_df.drop(columns=["result"])
     y = flat_df["result"]
+
+    # --- اعتبارسنجی K-Fold ---------------------------------------------------
+    # یک تقسیم تصادفی train/test (پایین‌تر) به اندازهٔ کافی برای دیتاست‌های کوچک
+    # (چند صد/چند هزار ردیف) قابل‌اعتماد نیست - با جابه‌جا شدن ۲۰٪ داده که در
+    # تست قرار می‌گیرد، عدد دقت می‌تواند به‌راحتی ۴-۵٪ نوسان کند و به اشتباه به‌نظر
+    # برسد مدل بهتر/بدتر شده، درحالی‌که فقط نویز آماری همان تقسیم است. در
+    # K-Fold، دیتاست به K بخش مساوی تقسیم می‌شود؛ مدل K بار آموزش می‌بیند
+    # (هر بار با یک بخش متفاوت به‌عنوان تست و بقیه به‌عنوان آموزش) و در آخر
+    # میانگین و انحراف‌معیار دقت روی این K اجرا گزارش می‌شود - تخمینی
+    # پایدارتر از یک تقسیم تکی.
+    print("\n--- اعتبارسنجی K-Fold (۵ بخش) برای تخمین پایدارتر دقت مدل ---")
+    k_folds = 5
+    skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
+    fold_accuracies = []
+    for fold_idx, (train_idx, test_idx) in enumerate(skf.split(X, y), start=1):
+        fold_model = xgb.XGBClassifier(
+            n_estimators=150,
+            learning_rate=0.05,
+            max_depth=5,
+            random_state=42,
+            eval_metric="logloss",
+        )
+        fold_model.fit(X.iloc[train_idx], y.iloc[train_idx])
+        fold_pred = fold_model.predict(X.iloc[test_idx])
+        fold_acc = accuracy_score(y.iloc[test_idx], fold_pred)
+        fold_accuracies.append(fold_acc)
+        print(f"  Fold {fold_idx}/{k_folds}: دقت = {fold_acc * 100:.2f}%")
+
+    mean_acc = float(np.mean(fold_accuracies))
+    std_acc = float(np.std(fold_accuracies))
+    print(f"میانگین دقت K-Fold: {mean_acc * 100:.2f}% (± {std_acc * 100:.2f}%)")
+    print("(این عدد تخمین قابل‌اعتمادتری از توانایی واقعی مدل است تا عدد "
+          "«دقت روی تست» که پایین‌تر چاپ می‌شود و فقط از یک تقسیم تکی می‌آید.)")
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
