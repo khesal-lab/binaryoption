@@ -158,6 +158,15 @@ def main() -> None:
               "خواهد کرد، نه این‌که واقعاً بین دو جهت تصمیم بگیرد. راه‌حل: دادهٔ بیشتر/متنوع‌تر "
               "جمع‌آوری کنید (به‌خصوص از جهتی که کمتر معامله شده)، یا max_depth را کمی افزایش دهید.")
 
+    # مهم‌ترین فیچرها از دید مدل (بر اساس اهمیت XGBoost - چند بار و چقدر مؤثر
+    # در تصمیم‌های درخت‌ها استفاده شده‌اند)، برای این‌که مشخص شود مدل واقعاً
+    # روی کدام ویژگی‌ها تکیه می‌کند - نه فقط جمع فیچرهای جهت‌دار.
+    top_n = 25
+    sorted_importances = sorted(importances.items(), key=lambda kv: kv[1], reverse=True)
+    print(f"\n--- {top_n} فیچر با بیشترین تأثیر ---")
+    for rank, (feature_name, importance) in enumerate(sorted_importances[:top_n], start=1):
+        print(f"  {rank:>2}. {feature_name:<45} {importance:.4f}")
+
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
     model.save_model(str(config.MODEL_JSON_PATH))
     with open(config.MODEL_FEATURES_PATH, "w", encoding="utf-8") as f:
