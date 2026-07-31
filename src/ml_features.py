@@ -59,6 +59,24 @@ _EXCLUDED_COLUMNS = {
 
 _CHART_SHAPE_FIELDS = ("o", "h", "l", "c", "bullish")
 
+# منبع واحد حقیقت برای فیچرهای «جهت‌دار» (خودِ direction_call + هر فیچری که
+# _add_direction_interaction_features می‌سازد). هر جای دیگری از کد (مثل
+# گزارش train_model.py) که نیاز به شناسایی این ستون‌ها دارد، باید از همین
+# مجموعه استفاده کند - نه یک فیلتر رشته‌ای جداگانه که ممکن است با تغییر نام
+# یکی از این فیچرها هماهنگ نماند (دقیقاً همان باگی که قبلاً باعث شد
+# streak_aligned_with_direction اشتباهاً «بدون سیگنال جهت» گزارش شود).
+DIRECTION_INTERACTION_COLUMNS = frozenset({
+    "direction_call",
+    "momentum_in_direction",
+    "momentum_smoothed_in_direction",
+    "acceleration_in_direction",
+    "trend_aligned_with_direction",
+    "streak_aligned_with_direction",
+    "candle_color_aligned_with_direction",
+    "distance_to_target_atr",
+    "distance_to_obstacle_atr",
+})
+
 
 def _flatten_chart_shape(row: dict) -> None:
     raw = row.pop("chart_shape_json", None)

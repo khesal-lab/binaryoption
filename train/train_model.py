@@ -53,7 +53,7 @@ from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import accuracy_score, classification_report
 
 import config
-from src.ml_features import flatten_snapshot_for_model
+from src.ml_features import flatten_snapshot_for_model, DIRECTION_INTERACTION_COLUMNS
 
 TOP_N_FEATURES = 25
 K_FOLDS = 5
@@ -122,11 +122,7 @@ def print_direction_signal(X: pd.DataFrame, model: xgb.XGBClassifier, label: str
     و همیشه یک جهت را انتخاب می‌کند. این‌جا زودتر و واضح هشدار می‌دهیم.
     برمی‌گرداند: دیکشنری کامل اهمیت فیچرها (برای استفادهٔ فراخوان).
     """
-    direction_related_cols = [
-        c for c in X.columns
-        if c == "direction_call" or c.endswith("_in_direction") or c.startswith("distance_to_")
-        or c == "trend_aligned_with_direction" or c == "candle_color_aligned_with_direction"
-    ]
+    direction_related_cols = [c for c in X.columns if c in DIRECTION_INTERACTION_COLUMNS]
     importances = dict(zip(X.columns, model.feature_importances_))
     direction_signal_total = sum(importances.get(c, 0.0) for c in direction_related_cols)
     print(f"\nمجموع اهمیت فیچرهای مرتبط با جهت (direction_call + هم‌جهت‌ها) {label}: "
@@ -196,6 +192,19 @@ def main() -> None:
     full_importances = print_direction_signal(X, full_model, label="(کامل)")
     top_feature_names = print_top_features(full_importances, TOP_N_FEATURES, label="(کامل)")
 
+    # فیچرهای جهت‌دار (direction_call و تعامل‌هایش) صرف‌نظر از رتبهٔ اهمیتشان
+    # به مدل مقایسه‌ای اضافه می‌شوند - چون توانایی تفکیک CALL از PUT یک نیاز
+    # عملکردی است، نه یک انتخاب اختیاری بر اساس رتبهٔ خام اهمیت. بدون این‌ها،
+    # مدل مقایسه‌ای فقط می‌تواند بگوید «این وضعیت کلی خوب است یا نه»، نه
+    # «کدام جهت را باید انتخاب کنم».
+    forced_direction_cols = [
+        c for c in DIRECTION_INTERACTION_COLUMNS if c in X.columns and c not in top_feature_names
+    ]
+    if forced_direction_cols:
+        print(f"\n(فیچرهای جهت‌دار زیر صرف‌نظر از رتبهٔ اهمیت، برای توانایی تفکیک CALL/PUT "
+              f"به مدل مقایسه‌ای اضافه شدند: {', '.join(forced_direction_cols)})")
+        top_feature_names = top_feature_names + forced_direction_cols
+
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
     full_model.save_model(str(config.MODEL_JSON_PATH))
     with open(config.MODEL_FEATURES_PATH, "w", encoding="utf-8") as f:
@@ -204,20 +213,20 @@ def main() -> None:
     print(f"Feature list saved to {config.MODEL_FEATURES_PATH}")
 
     # =========================================================================
-    # مدل مقایسه‌ای: فقط با TOP_N_FEATURES فیچر مهم‌تر (طبق مدل اصلی بالا)
+    # مدل مقایسه‌ای: TOP_N_FEATURES فیچر مهم‌تر + فیچرهای جهت‌دار اجباری
     # هدف: با مقایسهٔ دقت این مدل با مدل کامل، نقش واقعی بقیهٔ فیچرها (غیر از
-    # N تای برتر) در دقت کلی مشخص شود - نه استفادهٔ زنده در معامله.
+    # این مجموعه) در دقت کلی مشخص شود - نه استفادهٔ زنده در معامله.
     # =========================================================================
+    top_count = len(top_feature_names)
+    top_label = f"({top_count} فیچر: {TOP_N_FEATURES} برتر + جهت‌دار اجباری)"
     print("\n\n==========================================================")
-    print(f"مدل مقایسه‌ای: فقط {TOP_N_FEATURES} فیچر برتر بالا")
+    print(f"مدل مقایسه‌ای: {top_label}")
     print("==========================================================")
     X_top = X[top_feature_names]
 
-    top_kfold_mean, top_kfold_std = run_kfold_cv(X_top, y, label=f"(فقط {TOP_N_FEATURES} فیچر برتر)")
-    top_model, top_test_accuracy = train_final_model(
-        X_top, y, label=f"(فقط {TOP_N_FEATURES} فیچر برتر)"
-    )
-    print_direction_signal(X_top, top_model, label=f"(فقط {TOP_N_FEATURES} فیچر برتر)")
+    top_kfold_mean, top_kfold_std = run_kfold_cv(X_top, y, label=top_label)
+    top_model, top_test_accuracy = train_final_model(X_top, y, label=top_label)
+    print_direction_signal(X_top, top_model, label=top_label)
 
     top_model.save_model(str(config.MODEL_TOP_FEATURES_JSON_PATH))
     with open(config.MODEL_TOP_FEATURES_LIST_PATH, "w", encoding="utf-8") as f:
@@ -229,21 +238,20 @@ def main() -> None:
     # مقایسهٔ نهایی
     # =========================================================================
     print("\n\n--- مقایسهٔ مدل کامل در برابر مدل با فقط فیچرهای برتر ---")
-    print(f"{'':25}{'K-Fold (میانگین ± انحراف)':35}{'دقت روی تست':15}")
-    print(f"{'مدل کامل (' + str(len(X.columns)) + ' فیچر)':25}"
-          f"{f'{full_kfold_mean*100:.2f}% ± {full_kfold_std*100:.2f}%':35}"
-          f"{f'{full_test_accuracy*100:.2f}%':15}")
-    print(f"{'فقط ' + str(TOP_N_FEATURES) + ' فیچر برتر':25}"
-          f"{f'{top_kfold_mean*100:.2f}% ± {top_kfold_std*100:.2f}%':35}"
-          f"{f'{top_test_accuracy*100:.2f}%':15}")
+    print(f"مدل کامل ({len(X.columns)} فیچر):")
+    print(f"  K-Fold: {full_kfold_mean*100:.2f}% ± {full_kfold_std*100:.2f}%   |   "
+          f"دقت روی تست: {full_test_accuracy*100:.2f}%")
+    print(f"مدل مقایسه‌ای {top_label}:")
+    print(f"  K-Fold: {top_kfold_mean*100:.2f}% ± {top_kfold_std*100:.2f}%   |   "
+          f"دقت روی تست: {top_test_accuracy*100:.2f}%")
     diff = (top_kfold_mean - full_kfold_mean) * 100
     if abs(diff) < 1.0:
         print(f"\nتفاوت دقت K-Fold بین دو مدل ناچیز است ({diff:+.2f} واحد درصد) - یعنی بقیهٔ "
-              f"{len(X.columns) - TOP_N_FEATURES} فیچر (غیر از {TOP_N_FEATURES} تای برتر) عملاً "
-              "سیگنال اضافی معناداری به مدل نمی‌دهند.")
+              f"{len(X.columns) - top_count} فیچر (غیر از مجموعهٔ بالا) عملاً سیگنال اضافی "
+              "معناداری به مدل نمی‌دهند.")
     elif diff > 0:
-        print(f"\nمدل با فقط {TOP_N_FEATURES} فیچر برتر حتی کمی بهتر است (+{diff:.2f} واحد درصد) - "
-              "احتمالاً بقیهٔ فیچرها بیشتر نویز اضافه می‌کنند تا سیگنال.")
+        print(f"\nمدل مقایسه‌ای حتی کمی بهتر است (+{diff:.2f} واحد درصد) - احتمالاً بقیهٔ فیچرها "
+              "بیشتر نویز اضافه می‌کنند تا سیگنال.")
     else:
         print(f"\nمدل کامل {abs(diff):.2f} واحد درصد بهتر است - یعنی بقیهٔ فیچرها هم مقداری سیگنال "
               "واقعی (هرچند کوچک) به مدل اضافه می‌کنند.")
