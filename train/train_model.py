@@ -16,17 +16,25 @@
        فقط می‌تواند بگوید «این وضعیت به‌طور کلی خوب است یا نه»، بدون این‌که
        بداند کدام جهت را باید انتخاب کند.
 
-    ۳. ستون price_change_pct قطعاً حذف می‌شود. این ستون از روی قیمت خروج
-       محاسبه شده که فقط ۳ ثانیه *بعد* از ورود به معامله معلوم می‌شود — یعنی
-       در لحظهٔ واقعی تصمیم‌گیری (قبل از کلیک BUY/SELL) اصلاً وجود ندارد. اگر
-       این ستون در دادهٔ آموزشی بماند، دقتی که مدل روی دادهٔ تست نشان می‌دهد
-       گمراه‌کننده است (Data Leakage) — مدل چیزی را «پیش‌بینی» می‌کند که در
-       واقعیت هرگز در لحظهٔ تصمیم در دسترسش نیست.
+    ۳. ستون‌هایی که فقط بعد از پایان معامله معلوم می‌شوند (مثل
+       price_change_pct)، یا فقط بازتاب موقعیت زمانی/تجمعی ردیف در دیتاست‌اند
+       (مثل total_trades_so_far، overall_winrate) قطعاً حذف می‌شوند - این‌ها
+       یا نشتِ اطلاعات از آینده‌اند، یا در تقسیم تصادفی K-Fold/train_test_split
+       می‌توانند «بازهٔ زمانی این ردیف» را به‌جای یک الگوی بازار واقعی به مدل
+       نشان دهند (سیگنالی که در معاملهٔ زنده تعمیم پیدا نمی‌کند).
 
-نتیجه در قالب دو فایل ذخیره می‌شود:
-    - data/models/pocket_option_xgb_model.json  (خودِ مدل)
-    - data/models/feature_names.json            (لیست دقیق و ترتیب ستون‌ها)
-هر دو فایل توسط src/live_predictor.py برای معاملهٔ زنده لازم‌اند.
+علاوه بر مدل اصلی (با همهٔ فیچرها)، یک مدل مقایسه‌ای دوم هم فقط با N فیچر
+مهم‌تر (طبق اهمیت فیچر مدل اول) آموزش داده می‌شود - تا با مقایسهٔ دقت این دو
+مدل، نقش واقعی «بقیهٔ فیچرها» (غیر از N تای برتر) در دقت کلی روشن شود. این
+مدل دوم فقط برای مقایسه است؛ معاملهٔ زنده (main.py) همیشه از مدل اصلی با همهٔ
+فیچرها استفاده می‌کند.
+
+نتیجه در چهار فایل ذخیره می‌شود:
+    - data/models/pocket_option_xgb_model.json               (مدل اصلی)
+    - data/models/feature_names.json                         (فیچرهای مدل اصلی)
+    - data/models/pocket_option_xgb_model_top_features.json  (مدل مقایسه‌ای)
+    - data/models/feature_names_top_features.json            (فیچرهای مدل مقایسه‌ای)
+دو فایل اول توسط src/live_predictor.py برای معاملهٔ زنده لازم‌اند.
 """
 
 from __future__ import annotations
@@ -46,6 +54,101 @@ from sklearn.metrics import accuracy_score, classification_report
 
 import config
 from src.ml_features import flatten_snapshot_for_model
+
+TOP_N_FEATURES = 25
+K_FOLDS = 5
+
+
+def _new_classifier() -> xgb.XGBClassifier:
+    return xgb.XGBClassifier(
+        n_estimators=150,
+        learning_rate=0.05,
+        max_depth=5,
+        random_state=42,
+        eval_metric="logloss",
+    )
+
+
+def run_kfold_cv(X: pd.DataFrame, y: pd.Series, label: str) -> tuple[float, float]:
+    """
+    یک تقسیم تصادفی train/test به‌تنهایی برای دیتاست‌های چند‌هزارتایی
+    قابل‌اعتماد نیست - عدد دقت می‌تواند به‌راحتی چند درصد فقط به‌خاطر نویز
+    همان تقسیم نوسان کند. این‌جا دیتاست به K_FOLDS بخش مساوی تقسیم می‌شود؛
+    مدل K بار آموزش می‌بیند (هر بار با یک بخش متفاوت به‌عنوان تست) و میانگین/
+    انحراف‌معیار دقت روی این K اجرا برگردانده می‌شود - تخمینی پایدارتر از یک
+    تقسیم تکی.
+    """
+    print(f"\n--- اعتبارسنجی K-Fold ({K_FOLDS} بخش) {label} ---")
+    skf = StratifiedKFold(n_splits=K_FOLDS, shuffle=True, random_state=42)
+    fold_accuracies = []
+    for fold_idx, (train_idx, test_idx) in enumerate(skf.split(X, y), start=1):
+        fold_model = _new_classifier()
+        fold_model.fit(X.iloc[train_idx], y.iloc[train_idx])
+        fold_pred = fold_model.predict(X.iloc[test_idx])
+        fold_acc = accuracy_score(y.iloc[test_idx], fold_pred)
+        fold_accuracies.append(fold_acc)
+        print(f"  Fold {fold_idx}/{K_FOLDS}: دقت = {fold_acc * 100:.2f}%")
+
+    mean_acc = float(np.mean(fold_accuracies))
+    std_acc = float(np.std(fold_accuracies))
+    print(f"میانگین دقت K-Fold {label}: {mean_acc * 100:.2f}% (± {std_acc * 100:.2f}%)")
+    return mean_acc, std_acc
+
+
+def train_final_model(X: pd.DataFrame, y: pd.Series, label: str) -> tuple[xgb.XGBClassifier, float]:
+    """آموزش نهایی روی یک تقسیم تکی train/test، برای گزارش تفصیلی و ذخیرهٔ مدل."""
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+    print(f"\nTraining XGBoost model {label}...")
+    model = _new_classifier()
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_test)
+    accuracy = accuracy_score(y_test, y_pred)
+    print("==========================================")
+    print(f"📊 دقت روی دادهٔ تست {label}: {accuracy * 100:.2f}%")
+    print("==========================================")
+    print("\nDetailed Performance Report:")
+    print(classification_report(y_test, y_pred))
+    return model, accuracy
+
+
+def print_direction_signal(X: pd.DataFrame, model: xgb.XGBClassifier, label: str) -> dict[str, float]:
+    """
+    هشدار مهم: اگر مدل اصلاً روی direction_call یا فیچرهای «هم‌جهت با تصمیم»
+    Split نزده باشد، یعنی در معاملهٔ زنده نمی‌تواند بین CALL و PUT فرق بگذارد
+    و همیشه یک جهت را انتخاب می‌کند. این‌جا زودتر و واضح هشدار می‌دهیم.
+    برمی‌گرداند: دیکشنری کامل اهمیت فیچرها (برای استفادهٔ فراخوان).
+    """
+    direction_related_cols = [
+        c for c in X.columns
+        if c == "direction_call" or c.endswith("_in_direction") or c.startswith("distance_to_")
+        or c == "trend_aligned_with_direction" or c == "candle_color_aligned_with_direction"
+    ]
+    importances = dict(zip(X.columns, model.feature_importances_))
+    direction_signal_total = sum(importances.get(c, 0.0) for c in direction_related_cols)
+    print(f"\nمجموع اهمیت فیچرهای مرتبط با جهت (direction_call + هم‌جهت‌ها) {label}: "
+          f"{direction_signal_total:.4f}")
+    if direction_signal_total == 0.0:
+        print("⚠️  هشدار جدی: مدل هیچ‌کدام از فیچرهای مرتبط با جهت معامله را استفاده نکرده "
+              "— یعنی در معاملهٔ زنده احتمالاً همیشه یک جهت ثابت (مثلاً همیشه CALL) انتخاب "
+              "خواهد کرد، نه این‌که واقعاً بین دو جهت تصمیم بگیرد. راه‌حل: دادهٔ بیشتر/متنوع‌تر "
+              "جمع‌آوری کنید (به‌خصوص از جهتی که کمتر معامله شده)، یا max_depth را کمی افزایش دهید.")
+    return importances
+
+
+def print_top_features(importances: dict[str, float], top_n: int, label: str) -> list[str]:
+    """
+    مهم‌ترین فیچرها از دید مدل (بر اساس اهمیت XGBoost)، برای این‌که مشخص شود
+    مدل واقعاً روی کدام ویژگی‌ها تکیه می‌کند. لیست نام فیچرها را برمی‌گرداند.
+    """
+    sorted_importances = sorted(importances.items(), key=lambda kv: kv[1], reverse=True)
+    print(f"\n--- {top_n} فیچر با بیشترین تأثیر {label} ---")
+    for rank, (feature_name, importance) in enumerate(sorted_importances[:top_n], start=1):
+        print(f"  {rank:>2}. {feature_name:<45} {importance:.4f}")
+    return [name for name, _ in sorted_importances[:top_n]]
 
 
 def main() -> None:
@@ -85,95 +188,65 @@ def main() -> None:
     X = flat_df.drop(columns=["result"])
     y = flat_df["result"]
 
-    # --- اعتبارسنجی K-Fold ---------------------------------------------------
-    # یک تقسیم تصادفی train/test (پایین‌تر) به اندازهٔ کافی برای دیتاست‌های کوچک
-    # (چند صد/چند هزار ردیف) قابل‌اعتماد نیست - با جابه‌جا شدن ۲۰٪ داده که در
-    # تست قرار می‌گیرد، عدد دقت می‌تواند به‌راحتی ۴-۵٪ نوسان کند و به اشتباه به‌نظر
-    # برسد مدل بهتر/بدتر شده، درحالی‌که فقط نویز آماری همان تقسیم است. در
-    # K-Fold، دیتاست به K بخش مساوی تقسیم می‌شود؛ مدل K بار آموزش می‌بیند
-    # (هر بار با یک بخش متفاوت به‌عنوان تست و بقیه به‌عنوان آموزش) و در آخر
-    # میانگین و انحراف‌معیار دقت روی این K اجرا گزارش می‌شود - تخمینی
-    # پایدارتر از یک تقسیم تکی.
-    print("\n--- اعتبارسنجی K-Fold (۵ بخش) برای تخمین پایدارتر دقت مدل ---")
-    k_folds = 5
-    skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
-    fold_accuracies = []
-    for fold_idx, (train_idx, test_idx) in enumerate(skf.split(X, y), start=1):
-        fold_model = xgb.XGBClassifier(
-            n_estimators=150,
-            learning_rate=0.05,
-            max_depth=5,
-            random_state=42,
-            eval_metric="logloss",
-        )
-        fold_model.fit(X.iloc[train_idx], y.iloc[train_idx])
-        fold_pred = fold_model.predict(X.iloc[test_idx])
-        fold_acc = accuracy_score(y.iloc[test_idx], fold_pred)
-        fold_accuracies.append(fold_acc)
-        print(f"  Fold {fold_idx}/{k_folds}: دقت = {fold_acc * 100:.2f}%")
-
-    mean_acc = float(np.mean(fold_accuracies))
-    std_acc = float(np.std(fold_accuracies))
-    print(f"میانگین دقت K-Fold: {mean_acc * 100:.2f}% (± {std_acc * 100:.2f}%)")
-    print("(این عدد تخمین قابل‌اعتمادتری از توانایی واقعی مدل است تا عدد "
-          "«دقت روی تست» که پایین‌تر چاپ می‌شود و فقط از یک تقسیم تکی می‌آید.)")
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-
-    print("\nTraining XGBoost model...")
-    model = xgb.XGBClassifier(
-        n_estimators=150,
-        learning_rate=0.05,
-        max_depth=5,
-        random_state=42,
-        eval_metric="logloss",
-    )
-    model.fit(X_train, y_train)
-
-    y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
-    print("==========================================")
-    print(f"📊 Model Real Win-Rate (Accuracy on Test Data): {accuracy * 100:.2f}%")
-    print("==========================================")
-    print("\nDetailed Performance Report:")
-    print(classification_report(y_test, y_pred))
-
-    # هشدار مهم: اگر مدل اصلاً روی direction_call یا فیچرهای «هم‌جهت با
-    # تصمیم» Split نزده باشد، یعنی در معاملهٔ زنده نمی‌تواند بین CALL و PUT
-    # فرق بگذارد و همیشه یک جهت را انتخاب می‌کند (دقیقاً همان باگی که قبلاً
-    # دیده شد). این‌جا زودتر و واضح هشدار می‌دهیم.
-    direction_related_cols = [
-        c for c in X.columns
-        if c == "direction_call" or c.endswith("_in_direction") or c.startswith("distance_to_")
-        or c == "trend_aligned_with_direction" or c == "candle_color_aligned_with_direction"
-    ]
-    importances = dict(zip(X.columns, model.feature_importances_))
-    direction_signal_total = sum(importances.get(c, 0.0) for c in direction_related_cols)
-    print(f"\nمجموع اهمیت فیچرهای مرتبط با جهت (direction_call + هم‌جهت‌ها): {direction_signal_total:.4f}")
-    if direction_signal_total == 0.0:
-        print("⚠️  هشدار جدی: مدل هیچ‌کدام از فیچرهای مرتبط با جهت معامله را استفاده نکرده "
-              "— یعنی در معاملهٔ زنده احتمالاً همیشه یک جهت ثابت (مثلاً همیشه CALL) انتخاب "
-              "خواهد کرد، نه این‌که واقعاً بین دو جهت تصمیم بگیرد. راه‌حل: دادهٔ بیشتر/متنوع‌تر "
-              "جمع‌آوری کنید (به‌خصوص از جهتی که کمتر معامله شده)، یا max_depth را کمی افزایش دهید.")
-
-    # مهم‌ترین فیچرها از دید مدل (بر اساس اهمیت XGBoost - چند بار و چقدر مؤثر
-    # در تصمیم‌های درخت‌ها استفاده شده‌اند)، برای این‌که مشخص شود مدل واقعاً
-    # روی کدام ویژگی‌ها تکیه می‌کند - نه فقط جمع فیچرهای جهت‌دار.
-    top_n = 25
-    sorted_importances = sorted(importances.items(), key=lambda kv: kv[1], reverse=True)
-    print(f"\n--- {top_n} فیچر با بیشترین تأثیر ---")
-    for rank, (feature_name, importance) in enumerate(sorted_importances[:top_n], start=1):
-        print(f"  {rank:>2}. {feature_name:<45} {importance:.4f}")
+    # =========================================================================
+    # مدل اصلی: با همهٔ فیچرها
+    # =========================================================================
+    full_kfold_mean, full_kfold_std = run_kfold_cv(X, y, label="(کامل - همهٔ فیچرها)")
+    full_model, full_test_accuracy = train_final_model(X, y, label="(کامل - همهٔ فیچرها)")
+    full_importances = print_direction_signal(X, full_model, label="(کامل)")
+    top_feature_names = print_top_features(full_importances, TOP_N_FEATURES, label="(کامل)")
 
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    model.save_model(str(config.MODEL_JSON_PATH))
+    full_model.save_model(str(config.MODEL_JSON_PATH))
     with open(config.MODEL_FEATURES_PATH, "w", encoding="utf-8") as f:
         json.dump(list(X.columns), f, ensure_ascii=False, indent=2)
-
     print(f"\nModel saved to {config.MODEL_JSON_PATH}")
     print(f"Feature list saved to {config.MODEL_FEATURES_PATH}")
+
+    # =========================================================================
+    # مدل مقایسه‌ای: فقط با TOP_N_FEATURES فیچر مهم‌تر (طبق مدل اصلی بالا)
+    # هدف: با مقایسهٔ دقت این مدل با مدل کامل، نقش واقعی بقیهٔ فیچرها (غیر از
+    # N تای برتر) در دقت کلی مشخص شود - نه استفادهٔ زنده در معامله.
+    # =========================================================================
+    print("\n\n==========================================================")
+    print(f"مدل مقایسه‌ای: فقط {TOP_N_FEATURES} فیچر برتر بالا")
+    print("==========================================================")
+    X_top = X[top_feature_names]
+
+    top_kfold_mean, top_kfold_std = run_kfold_cv(X_top, y, label=f"(فقط {TOP_N_FEATURES} فیچر برتر)")
+    top_model, top_test_accuracy = train_final_model(
+        X_top, y, label=f"(فقط {TOP_N_FEATURES} فیچر برتر)"
+    )
+    print_direction_signal(X_top, top_model, label=f"(فقط {TOP_N_FEATURES} فیچر برتر)")
+
+    top_model.save_model(str(config.MODEL_TOP_FEATURES_JSON_PATH))
+    with open(config.MODEL_TOP_FEATURES_LIST_PATH, "w", encoding="utf-8") as f:
+        json.dump(top_feature_names, f, ensure_ascii=False, indent=2)
+    print(f"\nModel saved to {config.MODEL_TOP_FEATURES_JSON_PATH}")
+    print(f"Feature list saved to {config.MODEL_TOP_FEATURES_LIST_PATH}")
+
+    # =========================================================================
+    # مقایسهٔ نهایی
+    # =========================================================================
+    print("\n\n--- مقایسهٔ مدل کامل در برابر مدل با فقط فیچرهای برتر ---")
+    print(f"{'':25}{'K-Fold (میانگین ± انحراف)':35}{'دقت روی تست':15}")
+    print(f"{'مدل کامل (' + str(len(X.columns)) + ' فیچر)':25}"
+          f"{f'{full_kfold_mean*100:.2f}% ± {full_kfold_std*100:.2f}%':35}"
+          f"{f'{full_test_accuracy*100:.2f}%':15}")
+    print(f"{'فقط ' + str(TOP_N_FEATURES) + ' فیچر برتر':25}"
+          f"{f'{top_kfold_mean*100:.2f}% ± {top_kfold_std*100:.2f}%':35}"
+          f"{f'{top_test_accuracy*100:.2f}%':15}")
+    diff = (top_kfold_mean - full_kfold_mean) * 100
+    if abs(diff) < 1.0:
+        print(f"\nتفاوت دقت K-Fold بین دو مدل ناچیز است ({diff:+.2f} واحد درصد) - یعنی بقیهٔ "
+              f"{len(X.columns) - TOP_N_FEATURES} فیچر (غیر از {TOP_N_FEATURES} تای برتر) عملاً "
+              "سیگنال اضافی معناداری به مدل نمی‌دهند.")
+    elif diff > 0:
+        print(f"\nمدل با فقط {TOP_N_FEATURES} فیچر برتر حتی کمی بهتر است (+{diff:.2f} واحد درصد) - "
+              "احتمالاً بقیهٔ فیچرها بیشتر نویز اضافه می‌کنند تا سیگنال.")
+    else:
+        print(f"\nمدل کامل {abs(diff):.2f} واحد درصد بهتر است - یعنی بقیهٔ فیچرها هم مقداری سیگنال "
+              "واقعی (هرچند کوچک) به مدل اضافه می‌کنند.")
 
 
 if __name__ == "__main__":
