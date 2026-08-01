@@ -237,20 +237,31 @@ class WebSocketListener:
 
 async def launch_browser_and_wait_for_login() -> tuple[BrowserContext, Page]:
     """
-    مرورگر Chromium را با Playwright باز می‌کند، به صفحهٔ حساب دمو Pocket Option
-    می‌رود و منتظر می‌ماند تا کاربر به‌صورت دستی لاگین کند.
+    مرورگر را با Playwright باز می‌کند، به صفحهٔ حساب دمو Pocket Option می‌رود
+    و منتظر می‌ماند تا کاربر به‌صورت دستی لاگین کند.
 
     از یک پروفایل دائمی (Persistent Context) استفاده می‌شود تا در اجراهای بعدی
     نیازی به لاگین مجدد نباشد.
+
+    اگر config.BROWSER_CHANNEL = "chrome" باشد، به‌جای Chromium باندل‌شدهٔ
+    Playwright، از Google Chrome واقعیِ نصب‌شده روی سیستم استفاده می‌شود -
+    بعضی پلتفرم‌ها Chromium باندل‌شده را «مرورگر ناشناخته» تشخیص می‌دهند و
+    اجازهٔ لاگین نمی‌دهند. علاوه بر این، پرچم --disable-blink-features=
+    AutomationControlled هم اضافه می‌شود تا نشانه‌های آشکار خودکارسازی
+    (navigator.webdriver و مشابه) کمتر قابل‌تشخیص باشند.
     """
     playwright = await async_playwright().start()
 
-    context = await playwright.chromium.launch_persistent_context(
+    launch_kwargs = dict(
         user_data_dir=str(config.USER_DATA_DIR),
         headless=config.BROWSER_HEADLESS,
-        args=["--start-maximized"],
+        args=["--start-maximized", "--disable-blink-features=AutomationControlled"],
         no_viewport=True,
     )
+    if config.BROWSER_CHANNEL:
+        launch_kwargs["channel"] = config.BROWSER_CHANNEL
+
+    context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
     page = context.pages[0] if context.pages else await context.new_page()
 
     await page.goto(config.POCKET_OPTION_URL, wait_until="domcontentloaded")
