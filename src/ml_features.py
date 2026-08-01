@@ -77,6 +77,43 @@ DIRECTION_INTERACTION_COLUMNS = frozenset({
     "distance_to_obstacle_atr",
 })
 
+# فیچرهای «نوسان ریز» (Micro-Swing): یک خانوادهٔ به‌هم‌مرتبط از فیچرها (نه
+# مستقل از هم)، و در ترین‌های مختلف همیشه چند عضو (نه لزوماً همیشه یکی)
+# از این خانواده در فیچرهای برتر ظاهر شده‌اند. چون تعدادشان کم است (۱۵ ستون)،
+# کل خانواده - صرف‌نظر از رتبهٔ تک‌تک اعضا در یک ترین خاص - در مدل «فقط
+# فیچرهای برتر» نگه داشته می‌شود، تا نوسان رتبه بین اجراها یکی از آن‌ها را
+# اتفاقی حذف نکند.
+MICRO_SWING_COLUMNS = frozenset({
+    "micro_swing_last_direction",
+    "micro_swing_last_speed_pct",
+    "micro_swing_last_acceleration_pct",
+    "micro_swing_last3_speed_pct",
+    "micro_swing_last3_acceleration_pct",
+    "micro_swing_last3_displacement_pct",
+    "micro_swing_last3_distance_pct",
+    "micro_swing_last5_speed_pct",
+    "micro_swing_last5_acceleration_pct",
+    "micro_swing_last5_displacement_pct",
+    "micro_swing_last5_distance_pct",
+    "micro_swing_last15_speed_pct",
+    "micro_swing_last15_acceleration_pct",
+    "micro_swing_last15_displacement_pct",
+    "micro_swing_last15_distance_pct",
+})
+
+
+def chart_shape_long_current_candle_columns() -> frozenset[str]:
+    """
+    ستون‌های تخت‌شدهٔ آخرین کندل (کندلِ جاری) در پنجرهٔ بلندِ شکل چارت - یعنی
+    موقعیت کندل فعلی نسبت به یک بازهٔ وسیع‌تر (نه فقط پنجرهٔ کوتاه ۱۰ کندلی).
+    در آخرین ترین، دقیقاً همین ستون‌ها (به‌خصوص های و اوپن) رتبهٔ ۲ و ۷ اهمیت
+    را در کل مدل داشتند؛ برای این‌که نوسان رتبه در ترین‌های بعدی این سیگنالِ
+    اثبات‌شده را اتفاقی از مدل «فقط فیچرهای برتر» حذف نکند، همیشه نگه داشته
+    می‌شوند.
+    """
+    last_idx = config.CHART_WINDOW_CANDLES_LONG - 1
+    return frozenset(f"chart_shape_long_{last_idx}_{field}" for field in _CHART_SHAPE_FIELDS)
+
 
 def _flatten_chart_shape_generic(row: dict, json_key: str, prefix: str, window: int) -> None:
     raw = row.pop(json_key, None)
