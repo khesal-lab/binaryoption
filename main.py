@@ -74,6 +74,14 @@ async def tick_consumer_task(
             candle_aggregator.reset()
             market_structure.reset()
 
+        if tick.symbol != symbol_detector.current_symbol:
+            # این تیک مربوط به نماد دیگری است که هم‌زمان (مثلاً به‌خاطر یک هشدار قیمتی
+            # یا آیتم در لیست علاقه‌مندی‌ها) روی همان وب‌سوکت جاری شده، نه نماد چارتِ
+            # فعال. تا وقتی SymbolSwitchDetector این نماد را به‌عنوان تعویض واقعی تأیید
+            # نکرده، نباید وارد کندل/بافر/ساختار بازار شود؛ وگرنه high/low کندل با
+            # قیمت یک نماد کاملاً بی‌ربط آلوده می‌شود.
+            continue
+
         tick_buffer.add(tick)
         tick_history.add(tick)
         closed_candle = candle_aggregator.add_tick(tick)

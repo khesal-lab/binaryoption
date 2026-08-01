@@ -43,6 +43,7 @@ from src.browser_session import (
     extract_ticks_from_payload,
 )
 from src.feature_engineering import CandleAggregator
+from src.symbol_tracker import SymbolSwitchDetector
 
 config.DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -66,6 +67,11 @@ def _append(path, line: str) -> None:
 # با تیک‌های واقعیِ حساب لاگین‌شده، های/لوی کندل جاری چطور محاسبه می‌شود.
 _diag_candle_aggregator = CandleAggregator()
 _diag_last_symbol: str | None = None
+# همان تشخیص‌دهندهٔ تعویض نماد که main.py/collect_data.py استفاده می‌کنند - این‌جا هم
+# لازم است چون در حساب واقعی ممکن است چند نماد هم‌زمان (مثلاً به‌خاطر هشدار قیمتی یا
+# لیست علاقه‌مندی‌ها) روی همان وب‌سوکت جاری شوند؛ بدون فیلتر، تیک‌های نماد غیرفعال
+# مستقیماً وارد CandleAggregator می‌شوند و high/low کندل نمادِ فعال را آلوده می‌کنند.
+_diag_symbol_detector = SymbolSwitchDetector()
 
 
 def _log_parsed_ticks_and_candles(raw_str: str) -> None:
@@ -74,7 +80,8 @@ def _log_parsed_ticks_and_candles(raw_str: str) -> None:
     تکرار می‌کند - نه برای جایگزینیِ آن، بلکه برای این‌که رفتار واقعیِ
     CandleAggregator را تیک‌به‌تیک و جداگانه لاگ کنیم (بدون تأثیر روی جریان
     اصلی دیتاست). هر تغییر نماد، هر تیک، و وضعیت کامل کندل جاری بعد از هر تیک
-    ثبت می‌شود.
+    ثبت می‌شود. کندل‌ساز فقط با تیک‌های نمادِ فعال (تأییدشده توسط
+    SymbolSwitchDetector) به‌روز می‌شود؛ تیک‌های نمادهای دیگر فقط لاگ می‌شوند.
     """
     global _diag_last_symbol
     payload = _strip_socketio_prefix(raw_str)
@@ -89,6 +96,17 @@ def _log_parsed_ticks_and_candles(raw_str: str) -> None:
 
         _append(PARSED_LOG_PATH,
                 f"[{time.time():.3f}] TICK symbol={tick.symbol} price={tick.price} ts={tick.timestamp:.3f}")
+
+        if _diag_symbol_detector.check(tick.symbol):
+            _append(PARSED_LOG_PATH,
+                    f"[{time.time():.3f}] CANDLE-RESET (نماد فعال به‌طور تأییدشده به {tick.symbol} عوض شد)")
+            _diag_candle_aggregator.reset()
+
+        if tick.symbol != _diag_symbol_detector.current_symbol:
+            _append(PARSED_LOG_PATH,
+                    f"[{time.time():.3f}] TICK-IGNORED symbol={tick.symbol} "
+                    f"(نماد فعال فعلاً {_diag_symbol_detector.current_symbol} است)")
+            continue
 
         closed = _diag_candle_aggregator.add_tick(tick)
         if closed is not None:

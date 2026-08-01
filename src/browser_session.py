@@ -74,6 +74,13 @@ def _strip_socketio_prefix(raw: str) -> Optional[object]:
         return None
 
 
+# کف قابل‌قبول برای timestamp (تقریباً سال ۲۰۰۱ به بعد، به ثانیه). پیام‌های دیگری مثل
+# successsignals/stats شکل [symbol, seconds, count] دارند (مثل ["AUDCHF_otc", 180, 293])
+# که بدون این حد پایین، دقیقاً شبیه یک ردیف تیک واقعی تشخیص داده می‌شدند و به‌عنوان
+# قیمت و timestamp جعلی وارد صف تیک‌ها می‌شدند.
+_MIN_PLAUSIBLE_TICK_TIMESTAMP = 1_000_000_000
+
+
 def _looks_like_tick_row(item) -> bool:
     """
     تشخیص می‌دهد آیا یک لیست شبیه [symbol, timestamp, price] است یا نه.
@@ -82,11 +89,14 @@ def _looks_like_tick_row(item) -> bool:
     if not isinstance(item, (list, tuple)) or len(item) < 3:
         return False
     symbol, ts, price = item[0], item[1], item[2]
-    return (
+    if not (
         isinstance(symbol, str)
         and isinstance(ts, (int, float))
         and isinstance(price, (int, float))
-    )
+    ):
+        return False
+    ts_seconds = ts / 1000.0 if ts > 1e12 else float(ts)
+    return ts_seconds >= _MIN_PLAUSIBLE_TICK_TIMESTAMP
 
 
 def extract_ticks_from_payload(payload) -> list[Tick]:

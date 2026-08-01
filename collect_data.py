@@ -91,6 +91,15 @@ async def tick_consumer_and_strategy_task(
             level_tracker.reset()
             prev_tick = None
 
+        if tick.symbol != symbol_detector.current_symbol:
+            # این تیک مربوط به نماد دیگری است که هم‌زمان (مثلاً به‌خاطر یک هشدار قیمتی
+            # یا آیتم در لیست علاقه‌مندی‌ها) روی همان وب‌سوکت جاری شده، نه نماد چارتِ
+            # فعال. تا وقتی SymbolSwitchDetector این نماد را به‌عنوان تعویض واقعی تأیید
+            # نکرده، نباید وارد کندل/بافر/استراتژی شود - وگرنه هم high/low کندل با
+            # قیمت نماد بی‌ربط آلوده می‌شود و هم level_tracker.check_signal ممکن است
+            # prev_tick و tick را از دو نماد مختلف مقایسه کند و معاملهٔ واقعی اشتباه بزند.
+            continue
+
         tick_buffer.add(tick)
         tick_history.add(tick)
         closed_candle = candle_aggregator.add_tick(tick)
