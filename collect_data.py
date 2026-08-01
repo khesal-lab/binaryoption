@@ -19,6 +19,11 @@
 SQLITE_DB_PATH) با meta_trade_source="level_strategy" ثبت می‌شود - کاملاً
 قابل تفکیک از معاملات دستی یا معاملات ربات مدل‌محور (main.py با AUTO_TRADE_ENABLED).
 
+نسخهٔ استراتژی: config.LEVEL_STRATEGY_VARIANT مشخص می‌کند کدام‌یک از
+src/level_strategy.py ("basic"، پیش‌فرض) یا src/level_strategy_optimized.py
+("optimized" - معکوس‌سازی جهت بعد از باخت‌های متوالی در حالت نوسان دوطرفه)
+اجرا شود.
+
 هشدار: فقط روی حساب دمو اجرا کنید.
 """
 
@@ -41,6 +46,7 @@ from src.data_logger import DataLogger
 from src.trade_click_listener import attach_trade_button_listeners
 from src.trade_executor import click_trade_button
 from src.level_strategy import LevelStrategyTracker
+from src.level_strategy_optimized import OptimizedLevelStrategyTracker
 from src.symbol_tracker import SymbolSwitchDetector
 
 
@@ -50,7 +56,7 @@ async def tick_consumer_and_strategy_task(
     tick_history: TickHistory,
     candle_aggregator: CandleAggregator,
     market_structure: MarketStructureTracker,
-    level_tracker: LevelStrategyTracker,
+    level_tracker: LevelStrategyTracker | OptimizedLevelStrategyTracker,
     page,
     click_source_holder: dict,
     data_logger: DataLogger,
@@ -172,7 +178,14 @@ async def main() -> None:
     candle_aggregator = CandleAggregator()
     market_structure = MarketStructureTracker()
     trade_history = TradeHistory()
-    level_tracker = LevelStrategyTracker()
+
+    if config.LEVEL_STRATEGY_VARIANT == "optimized":
+        level_tracker = OptimizedLevelStrategyTracker()
+        print("[CollectData] نسخهٔ optimized استراتژی سطوح فعال است "
+              f"(معکوس‌سازی جهت بعد از {config.LEVEL_STRATEGY_REVERSE_AFTER_LOSSES} باخت متوالی "
+              "در حالت نوسان دوطرفه).")
+    else:
+        level_tracker = LevelStrategyTracker()
 
     deal_buffer = DealResultBuffer()
 
@@ -181,8 +194,15 @@ async def main() -> None:
     ws_listener = WebSocketListener(tick_queue, deal_buffer)
     ws_listener.attach(page)
 
+    def _on_trade_result(source: str, result: int) -> None:
+        # فقط نسخهٔ optimized متد on_result دارد و فقط نتیجهٔ معاملات همین
+        # استراتژی (نه معاملات دستی احتمالی) باید بازخوردش داده شود.
+        if source == "level_strategy" and hasattr(level_tracker, "on_result"):
+            level_tracker.on_result(result)
+
     data_logger = DataLogger(
-        tick_buffer, tick_history, candle_aggregator, market_structure, trade_history, deal_buffer, page=page
+        tick_buffer, tick_history, candle_aggregator, market_structure, trade_history, deal_buffer,
+        page=page, on_result_callback=_on_trade_result,
     )
     await data_logger.install_page_controls()
     print(f"[CollectData] نظارت پی‌آوت فعال: اگر پی‌آوت واقعیِ یک معامله کمتر از "

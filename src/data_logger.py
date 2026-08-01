@@ -36,7 +36,7 @@ import json
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Callable, Literal, Optional
 
 import pandas as pd
 
@@ -137,6 +137,7 @@ class DataLogger:
         trade_history: TradeHistory,
         deal_buffer: Optional[DealResultBuffer] = None,
         page=None,
+        on_result_callback: Optional[Callable[[str, int], None]] = None,
         csv_path=config.CSV_LOG_PATH,
         sqlite_path=config.SQLITE_DB_PATH,
         expiry_seconds: float = config.TRADE_EXPIRY_SECONDS,
@@ -151,6 +152,10 @@ class DataLogger:
         # برای نمایش بنر هشدار پی‌آوت پایین مستقیماً روی صفحهٔ مرورگر (اختیاری -
         # اگر داده نشود، فقط در ترمینال هشدار داده می‌شود).
         self.page = page
+        # اختیاری: بعد از مشخص‌شدن نتیجهٔ هر معامله با (source, result) صدا زده
+        # می‌شود - مثلاً برای این‌که استراتژی سطوح بهینه‌شده (level_strategy_
+        # optimized.py) از نتیجهٔ واقعی معاملات خودش مطلع شود.
+        self.on_result_callback = on_result_callback
         self.csv_path = csv_path
         self.sqlite_path = sqlite_path
         self.expiry_seconds = expiry_seconds
@@ -167,6 +172,10 @@ class DataLogger:
         # برای جلوگیری از توقف اشتباهی به‌خاطر یک خوانش نادرست تکی (تشخیص
         # heuristic پی‌آوت گاهی ممکن است رکورد معاملهٔ دیگری را بگیرد).
         self._low_payout_streak = 0
+        # آخرین درصد پی‌آوتی که باعث توقف شد - برای این‌که بعد از رفرش/Reload
+        # صفحه (که DOM و بنر تزریق‌شده را از بین می‌برد) بتوانیم همان بنر را
+        # با همان پیام دوباره بسازیم.
+        self._last_low_payout_percent: Optional[float] = None
 
         self._init_sqlite()
 
@@ -264,6 +273,8 @@ class DataLogger:
         self.trade_history.add_result(result)
         if pending.source != "manual":
             self.bot_trade_history.add_result(result)
+        if self.on_result_callback is not None:
+            self.on_result_callback(pending.source, result)
 
         payout_percent = _extract_payout_percent(raw_deal, result)
 
@@ -313,10 +324,10 @@ class DataLogger:
             progress += f" از حدود {target} (نمونهٔ اولیهٔ پیشنهادی) — {min(100, lifetime_total / target * 100):.0f}٪"
         source_tag = f" [{pending.source}]" if pending.source != "manual" else ""
         print(f"[DataLogger] نتیجهٔ معامله{source_tag}: {outcome_text} (منبع: {result_source}) | "
-              f"وین‌ریت لحظه‌ای: {self.trade_history.get_rolling_winrate():.2%}{progress}")
+              f"وین‌ریت کلی از شروع اجرا: {self.trade_history.get_overall_winrate():.2%}{progress}")
         if pending.source != "manual":
-            print(f"[DataLogger] وین‌ریت زندهٔ ربات ({pending.source}): "
-                  f"{self.bot_trade_history.get_rolling_winrate():.2%} "
+            print(f"[DataLogger] وین‌ریت کلیِ ربات ({pending.source}) از شروع اجرا: "
+                  f"{self.bot_trade_history.get_overall_winrate():.2%} "
                   f"روی {self.bot_trade_history.total_trades()} معاملهٔ خودکار")
 
     async def _show_low_payout_banner(self, payout_percent: float) -> None:
@@ -329,10 +340,13 @@ class DataLogger:
         """
         if self.page is None:
             return
+        # ذخیره می‌شود تا اگر صفحه رفرش/Reload شد (و همین بنر از بین رفت)،
+        # بتوانیم دقیقاً همین بنر را با _on_page_load دوباره بسازیم.
+        self._last_low_payout_percent = payout_percent
         message = (
             f"⚠️ پی‌آوت به {payout_percent:.1f}٪ افت کرد (کمتر از حد مجاز "
             f"{config.MIN_PAYOUT_PERCENT}٪) - معاملهٔ خودکار متوقف شد. "
-            f"برای فعال‌سازی دوباره، 'resume' را در ترمینال تایپ کنید."
+            f"برای فعال‌سازی دوباره، 'resume' را در ترمینال تایپ کنید یا دکمهٔ ازسرگیری را بزنید."
         )
         js = """
         (text) => {
@@ -401,12 +415,37 @@ class DataLogger:
         تزریق می‌کند - برای این‌که نیازی به تایپ دستور در ترمینال نباشد. باید
         دقیقاً یک‌بار، بعد از ساخت DataLogger با page واقعی، await شود (مثلاً
         در main() اسکریپت). اگر page در دسترس نباشد، بی‌اثر برمی‌گردد.
+
+        چون رفرش/Reload صفحه (چه دستی توسط کاربر، چه توسط reconnect_page_if_
+        needed) کل DOM را از نو می‌سازد - یعنی دکمه و بنر پی‌آوت از بین
+        می‌روند - این‌جا روی رویداد 'domcontentloaded' صفحه هم مشترک می‌شویم تا
+        بعد از هر بارگذاری دوباره، همین کنترل‌ها را با وضعیت فعلی بازسازی کنیم.
+        expose_function خودش توسط Playwright بین navigation ها حفظ می‌شود، پس
+        فقط یک‌بار در همین‌جا (نه در هر reload) صدا زده می‌شود.
         """
         if self.page is None:
             return
 
         await self.page.expose_function("pocketBotToggleTrading", self._toggle_trading_from_page)
+        await self._inject_toggle_button()
+        self.page.on("domcontentloaded", lambda: asyncio.create_task(self._on_page_load()))
 
+    async def _on_page_load(self) -> None:
+        """
+        بعد از هر بارگذاریِ دوبارهٔ صفحه (رفرش دستی یا Reconnect خودکار) صدا
+        زده می‌شود: دکمهٔ توقف/ازسرگیری را دوباره می‌سازد و اگر معاملهٔ خودکار
+        از قبل متوقف بوده، همان بنر پی‌آوت را هم دوباره نمایش می‌دهد - تا هیچ‌
+        کدام از این کنترل‌ها با رفرش صفحه گم نشوند.
+        """
+        await self._inject_toggle_button()
+        await self._sync_toggle_button()
+        if self.trading_paused and self._last_low_payout_percent is not None:
+            await self._show_low_payout_banner(self._last_low_payout_percent)
+
+    async def _inject_toggle_button(self) -> None:
+        """فقط تزریق DOM دکمه (بدون expose_function) - جداگانه تا هم در راه‌اندازی اولیه، هم بعد از هر reload صدا زده شود."""
+        if self.page is None:
+            return
         js = """
         () => {
             let btn = document.getElementById('__trading_toggle_btn__');
