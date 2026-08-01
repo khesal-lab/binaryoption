@@ -4,23 +4,29 @@
 
 هدف این اسکریپت، برخلاف main.py، ساخت دیتاست نیست — فقط **جمع‌آوری خام هر نوع
 داده‌ای** است که ممکن است نتیجهٔ برد/باخت یک معامله در آن پنهان باشد، تا بشود
-با بررسی آن فهمید نتیجه از کدام کانال و با چه فرمتی قابل استخراج است:
+با بررسی آن فهمید نتیجه از کدام کانال و با چه فرمتی قابل استخراج است، یا این‌که
+آیا رفتار جریان تیک/کندل بین حساب دمو و حساب واقعیِ لاگین‌شده فرق دارد:
 
     ۱. تمام فریم‌های WebSocket، هم ارسالی و هم دریافتی (با دقت میلی‌ثانیه)
     ۲. تمام درخواست/پاسخ‌های شبکه از نوع XHR/Fetch (که خیلی از بروکرها نتیجهٔ
        تسویهٔ معامله را از این طریق برمی‌گردانند، نه فقط WebSocket)
     ۳. پیام‌های console صفحه (اگر پلتفرم چیزی لاگ کند)
+    ۴. تیک‌های Parse‌شده (همان extract_ticks_from_payload خودِ پروژه) و
+       وضعیت کندل‌سازِ (CandleAggregator) واقعی، تیک‌به‌تیک - تا مستقیماً
+       بشود دید که «های/لوی کندل جاری» که کد محاسبه می‌کند، دقیقاً منطبق با
+       زمان واقعی است یا (مثلاً) از کندل قبلی می‌آید.
 
 نحوهٔ استفاده:
     python capture_diagnostics.py
-    - مثل main.py دستی وارد حساب دمو شوید و Enter بزنید.
+    - مثل main.py دستی وارد حساب (دمو یا واقعی) شوید و Enter بزنید.
     - چند معامله انجام دهید — حتماً ترکیبی از چند برد و چند باخت (که بعداً با
       نگاه‌کردن به این‌که کدام لحظه‌ها برد/باخت بودند، بشود لاگ‌ها را match کرد).
     - در ترمینال 'q' + Enter بزنید تا اسکریپت با ذخیرهٔ همهٔ لاگ‌ها تمام شود.
     - فایل‌های زیر در data/diagnostics/ ساخته می‌شوند؛ همه را بفرستید:
-        ws_frames.log       فریم‌های وب‌ساکت (SENT/RECV) با زمان
-        network.log         درخواست/پاسخ‌های XHR و Fetch با زمان
-        console.log         پیام‌های console صفحه
+        ws_frames.log              فریم‌های وب‌ساکت خام (SENT/RECV) با زمان
+        network.log                درخواست/پاسخ‌های XHR و Fetch با زمان
+        console.log                پیام‌های console صفحه
+        parsed_ticks_candles.log   هر تیکِ Parse‌شده + وضعیت کندل جاری بعد از هر تیک
 """
 
 from __future__ import annotations
@@ -31,13 +37,19 @@ import time
 from playwright.async_api import Page, Request, Response, WebSocket
 
 import config
-from src.browser_session import launch_browser_and_wait_for_login
+from src.browser_session import (
+    launch_browser_and_wait_for_login,
+    _strip_socketio_prefix,
+    extract_ticks_from_payload,
+)
+from src.feature_engineering import CandleAggregator
 
 config.DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
 
 WS_LOG_PATH = config.DIAGNOSTICS_DIR / "ws_frames.log"
 NETWORK_LOG_PATH = config.DIAGNOSTICS_DIR / "network.log"
 CONSOLE_LOG_PATH = config.DIAGNOSTICS_DIR / "console.log"
+PARSED_LOG_PATH = config.DIAGNOSTICS_DIR / "parsed_ticks_candles.log"
 
 _MAX_BODY_CHARS = 3000  # برش بدنهٔ پاسخ‌های بزرگ برای جلوگیری از لاگ‌های حجیم
 
@@ -48,6 +60,47 @@ def _append(path, line: str) -> None:
             f.write(line + "\n")
     except OSError as exc:
         print(f"[Diagnostics] خطا در نوشتن {path}: {exc}")
+
+
+# کندل‌سازِ واقعیِ پروژه، فقط برای همین اسکریپت تشخیصی - تا مستقیماً ببینیم
+# با تیک‌های واقعیِ حساب لاگین‌شده، های/لوی کندل جاری چطور محاسبه می‌شود.
+_diag_candle_aggregator = CandleAggregator()
+_diag_last_symbol: str | None = None
+
+
+def _log_parsed_ticks_and_candles(raw_str: str) -> None:
+    """
+    همان مسیر parse خودِ WebSocketListener (browser_session.py) را این‌جا هم
+    تکرار می‌کند - نه برای جایگزینیِ آن، بلکه برای این‌که رفتار واقعیِ
+    CandleAggregator را تیک‌به‌تیک و جداگانه لاگ کنیم (بدون تأثیر روی جریان
+    اصلی دیتاست). هر تغییر نماد، هر تیک، و وضعیت کامل کندل جاری بعد از هر تیک
+    ثبت می‌شود.
+    """
+    global _diag_last_symbol
+    payload = _strip_socketio_prefix(raw_str)
+    if payload is None:
+        return
+
+    for tick in extract_ticks_from_payload(payload):
+        if _diag_last_symbol is not None and tick.symbol != _diag_last_symbol:
+            _append(PARSED_LOG_PATH,
+                    f"[{time.time():.3f}] SYMBOL-CHANGE {_diag_last_symbol} -> {tick.symbol}")
+        _diag_last_symbol = tick.symbol
+
+        _append(PARSED_LOG_PATH,
+                f"[{time.time():.3f}] TICK symbol={tick.symbol} price={tick.price} ts={tick.timestamp:.3f}")
+
+        closed = _diag_candle_aggregator.add_tick(tick)
+        if closed is not None:
+            _append(PARSED_LOG_PATH,
+                    f"[{time.time():.3f}] CANDLE-CLOSED start={closed.start_time:.0f} "
+                    f"open={closed.open} high={closed.high} low={closed.low} close={closed.close}")
+
+        current = _diag_candle_aggregator.current
+        if current is not None:
+            _append(PARSED_LOG_PATH,
+                    f"[{time.time():.3f}] CANDLE-CURRENT start={current.start_time:.0f} "
+                    f"open={current.open} high={current.high} low={current.low} close={current.close}")
 
 
 def _attach_websocket_logging(page: Page) -> None:
@@ -63,6 +116,7 @@ def _attach_websocket_logging(page: Page) -> None:
         def on_received(payload):
             text = payload if isinstance(payload, str) else payload.decode("utf-8", errors="ignore")
             _append(WS_LOG_PATH, f"[{time.time():.3f}] RECV {text[:_MAX_BODY_CHARS]}")
+            _log_parsed_ticks_and_candles(text)
 
         def on_close():
             _append(WS_LOG_PATH, f"[{time.time():.3f}] WS-CLOSE {ws.url}")
