@@ -241,8 +241,10 @@ async def main() -> None:
     data_logger = DataLogger(
         tick_buffer, tick_history, candle_aggregator, market_structure, trade_history, deal_buffer, page=page
     )
+    await data_logger.install_page_controls()
     print(f"[Main] نظارت پی‌آوت فعال: اگر پی‌آوت واقعیِ یک معامله کمتر از "
           f"{config.MIN_PAYOUT_PERCENT}٪ باشد، معاملهٔ خودکار (AUTO_TRADE) متوقف می‌شود.")
+    print("[Main] یک دکمهٔ «توقف/ازسرگیری معاملهٔ خودکار» هم پایین-چپ صفحهٔ مرورگر اضافه شد.")
 
     # وقتی معاملهٔ خودکار (auto_trade_task) دکمه را برنامه‌ای کلیک می‌کند، درست
     # قبل از کلیک این مقدار را به "bot" تغییر می‌دهد؛ شنوندهٔ کلیک زیر که هم
