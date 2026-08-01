@@ -78,9 +78,8 @@ DIRECTION_INTERACTION_COLUMNS = frozenset({
 })
 
 
-def _flatten_chart_shape(row: dict) -> None:
-    raw = row.pop("chart_shape_json", None)
-    window = config.CHART_WINDOW_CANDLES
+def _flatten_chart_shape_generic(row: dict, json_key: str, prefix: str, window: int) -> None:
+    raw = row.pop(json_key, None)
     try:
         candles = json.loads(raw) if raw else []
     except (TypeError, ValueError):
@@ -95,7 +94,18 @@ def _flatten_chart_shape(row: dict) -> None:
         for field in _CHART_SHAPE_FIELDS:
             neutral = 0.5 if field != "bullish" else 0
             value = candle.get(field, neutral) if candle else neutral
-            row[f"chart_shape_{i}_{field}"] = value
+            row[f"{prefix}_{i}_{field}"] = value
+
+
+def _flatten_chart_shape(row: dict) -> None:
+    _flatten_chart_shape_generic(row, "chart_shape_json", "chart_shape", config.CHART_WINDOW_CANDLES)
+
+
+def _flatten_chart_shape_long(row: dict) -> None:
+    """پنجرهٔ دوم و بزرگ‌تر (پیش‌فرض ۲۵ کندل) - همان روش Flatten، پیشوند جدا (chart_shape_long_*) تا با پنجرهٔ کوچک قاطی نشود."""
+    _flatten_chart_shape_generic(
+        row, "chart_shape_long_json", "chart_shape_long", config.CHART_WINDOW_CANDLES_LONG
+    )
 
 
 def _flatten_tick_velocities(row: dict) -> None:
@@ -163,6 +173,7 @@ def flatten_snapshot_for_model(snapshot: dict) -> dict[str, float]:
     _encode_direction(row)
     _add_direction_interaction_features(row)
     _flatten_chart_shape(row)
+    _flatten_chart_shape_long(row)
     _flatten_tick_velocities(row)
 
     for col in _EXCLUDED_COLUMNS:
