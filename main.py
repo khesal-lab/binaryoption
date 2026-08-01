@@ -236,11 +236,11 @@ async def main() -> None:
 
     predictor: LivePredictor | None = None
     if config.AUTO_TRADE_ENABLED:
-        if config.MODEL_JSON_PATH.exists() and config.MODEL_FEATURES_PATH.exists():
-            predictor = LivePredictor(config.MODEL_JSON_PATH, config.MODEL_FEATURES_PATH)
+        if config.LIVE_MODEL_JSON_PATH.exists() and config.LIVE_MODEL_FEATURES_PATH.exists():
+            predictor = LivePredictor(config.LIVE_MODEL_JSON_PATH, config.LIVE_MODEL_FEATURES_PATH)
         else:
             print(f"[Main] AUTO_TRADE_ENABLED فعال است ولی فایل مدل پیدا نشد "
-                  f"({config.MODEL_JSON_PATH})؛ حالت معاملهٔ خودکار غیرفعال می‌ماند.")
+                  f"({config.LIVE_MODEL_JSON_PATH})؛ حالت معاملهٔ خودکار غیرفعال می‌ماند.")
 
     stop_event = asyncio.Event()
 

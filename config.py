@@ -22,7 +22,8 @@ CANDLE_TIMEFRAME_SECONDS = 60    # تایم فریم کندل (۱ دقیقه)
 # پارامترهای ساختار بازار (Swing / Leg / Support-Resistance / Chart Shape)
 # ---------------------------------------------------------------------------
 CHART_WINDOW_CANDLES = 10        # تعداد کندل اخیر برای «شکل چارت» نرمال‌شده (برابر با پنجرهٔ دیداری واقعی شما)
-# باید به‌اندازهٔ کافی بزرگ باشد تا هم CHART_WINDOW_CANDLES و هم چند سوئینگ قبل از آن‌ها را پوشش دهد
+CHART_WINDOW_CANDLES_LONG = 25   # پنجرهٔ دوم و بزرگ‌تر «شکل چارت» - برای الگوهای بزرگ‌تر/بافت کلی‌تر بازار
+# باید به‌اندازهٔ کافی بزرگ باشد تا هم بزرگ‌ترین پنجرهٔ چارت‌شیپ و هم چند سوئینگ قبل از آن‌ها را پوشش دهد
 CANDLE_HISTORY_SIZE = 60
 SWING_FRACTAL_K = 1              # تعداد کندل همسایه برای تشخیص سوئینگ (فرکتال)
 SR_LOOKBACK_SWINGS = 5           # تعداد آخرین سوئینگ‌ها برای تعیین مقاومت/حمایت «اخیر»
@@ -96,10 +97,23 @@ MODEL_JSON_PATH = MODEL_DIR / "pocket_option_xgb_model.json"
 MODEL_FEATURES_PATH = MODEL_DIR / "feature_names.json"
 
 # مدل مقایسه‌ای که فقط با N فیچر مهم‌تر (طبق train/train_model.py) آموزش
-# می‌بیند - صرفاً برای مقایسه و درک نقش بقیهٔ فیچرها؛ در معاملهٔ زنده استفاده
-# نمی‌شود (main.py همیشه از MODEL_JSON_PATH بالا می‌خواند).
+# می‌بیند - برای مقایسه و درک نقش بقیهٔ فیچرها ساخته شد، اما طبق تست‌ها دقتش
+# عملاً هم‌تراز مدل کامل است (با فیچرهای خیلی کمتر - سبک‌تر و سریع‌تر).
 MODEL_TOP_FEATURES_JSON_PATH = MODEL_DIR / "pocket_option_xgb_model_top_features.json"
 MODEL_TOP_FEATURES_LIST_PATH = MODEL_DIR / "feature_names_top_features.json"
+
+# این‌که معاملهٔ زندهٔ main.py از کدام مدل استفاده کند:
+#   "full"          -> مدل کامل با همهٔ فیچرها (MODEL_JSON_PATH / MODEL_FEATURES_PATH)
+#   "top_features"  -> مدل سبک‌تر با فقط فیچرهای مهم + جهت‌دار اجباری
+#                      (MODEL_TOP_FEATURES_JSON_PATH / MODEL_TOP_FEATURES_LIST_PATH)
+LIVE_MODEL_VARIANT = "top_features"
+
+if LIVE_MODEL_VARIANT == "top_features":
+    LIVE_MODEL_JSON_PATH = MODEL_TOP_FEATURES_JSON_PATH
+    LIVE_MODEL_FEATURES_PATH = MODEL_TOP_FEATURES_LIST_PATH
+else:
+    LIVE_MODEL_JSON_PATH = MODEL_JSON_PATH
+    LIVE_MODEL_FEATURES_PATH = MODEL_FEATURES_PATH
 
 # حداقل احتمال بردی که مدل باید برای یک جهت پیش‌بینی کند تا معامله واقعاً
 # باز شود (بین ۰ و ۱). هرچه بالاتر، معاملات کمتر ولی مطمئن‌تر.

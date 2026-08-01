@@ -14,7 +14,8 @@
     - تعداد کندل‌های هم‌رنگ متوالی (Streak)
     - نسبت انبساط/انقباض نوسان (ATR کوتاه به ATR بلند)
     - عدم‌تقارن سایه‌ها نسبت به میانگین اخیر
-    - شکل نرمال‌شدهٔ ۲۰ کندل اخیر چارت (برای یادگیری الگوهای بزرگ توسط مدل)
+    - شکل نرمال‌شدهٔ دو پنجرهٔ اخیر چارت (کوتاه و بلند - برای یادگیری هم الگوی
+      نزدیک، هم بافت/الگوی بزرگ‌تر بازار توسط مدل)
 
 هیچ‌کدام از خروجی‌های این ماژول مقدار خام قیمت نیستند؛ همه یا نسبت‌اند، یا
 درصد، یا پرچم صفر/یک، یا برچسب رژیم (طبقه‌بندی).
@@ -76,6 +77,7 @@ class MarketStructureTracker:
         self,
         history_size: int = config.CANDLE_HISTORY_SIZE,
         chart_window: int = config.CHART_WINDOW_CANDLES,
+        chart_window_long: int = config.CHART_WINDOW_CANDLES_LONG,
         fractal_k: int = config.SWING_FRACTAL_K,
         sr_lookback_swings: int = config.SR_LOOKBACK_SWINGS,
         atr_period_short: int = config.ATR_PERIOD_SHORT,
@@ -85,6 +87,7 @@ class MarketStructureTracker:
         trend_swing_lookback: int = config.TREND_SWING_LOOKBACK,
     ):
         self.chart_window = chart_window
+        self.chart_window_long = chart_window_long
         self.fractal_k = fractal_k
         self.sr_lookback_swings = sr_lookback_swings
         self.atr_period_short = atr_period_short
@@ -180,21 +183,15 @@ class MarketStructureTracker:
             return 0.0
         return (candle.upper_wick - candle.lower_wick) / total
 
-    def get_normalized_chart_shape(self, current_candle: Optional[Candle] = None) -> list[dict]:
+    def _normalized_window_shape(self, window_size: int, current_candle: Optional[Candle]) -> list[dict]:
         """
-        دقیقاً همان چیزی که روی صفحهٔ چارت دیده می‌شود: یک «پنجرهٔ دیداری» ثابت
-        (پیش‌فرض ۲۰ کندل، شامل کندلِ در حال شکل‌گیری فعلی به‌عنوان لبهٔ راست
-        صفحه) که محور قیمتش خودش را با همان پنجره Auto-Scale می‌کند — دقیقاً مثل
-        صفحهٔ واقعی پلتفرم که با ورود کندل جدید، مقیاس Y را با محدودهٔ کندل‌های
-        دیده‌شده تنظیم می‌کند.
-
-        هیچ مرجع بیرونی (نه قیمت لحظهٔ ورود، نه ATR، نه شمارهٔ زمانی) استفاده
-        نمی‌شود؛ فقط مختصات نسبی خودِ پنجره (۰ تا ۱ بر اساس های/لوی همین پنجره).
-        ترتیب لیست از قدیم به جدید است (دقیقاً مثل خواندن چارت از چپ به راست)،
-        و همین ترتیب جایگزین هر عدد زمانی می‌شود.
+        منطق مشترک شکل نرمال‌شدهٔ چارت برای یک پنجرهٔ دلخواه (کوچک یا بزرگ):
+        محور قیمت خودش را با همان پنجره Auto-Scale می‌کند (۰ تا ۱ نسبت به های/
+        لوی همان پنجره) - هیچ مرجع بیرونی (قیمت خام، ATR، زمان) استفاده
+        نمی‌شود، پس مستقل از نماد/سطح قیمت و برای هر چارتی قابل تطبیق است.
         """
         closed = list(self.candles)
-        window = closed[-(self.chart_window - 1):] if current_candle else closed[-self.chart_window:]
+        window = closed[-(window_size - 1):] if current_candle else closed[-window_size:]
         if current_candle:
             window = window + [current_candle]
         if not window:
@@ -219,6 +216,25 @@ class MarketStructureTracker:
             }
             for c in window
         ]
+
+    def get_normalized_chart_shape(self, current_candle: Optional[Candle] = None) -> list[dict]:
+        """
+        دقیقاً همان چیزی که روی صفحهٔ چارت دیده می‌شود: یک «پنجرهٔ دیداری» ثابت
+        (پیش‌فرض ۱۰ کندل، شامل کندلِ در حال شکل‌گیری فعلی به‌عنوان لبهٔ راست
+        صفحه) - ترتیب لیست از قدیم به جدید است (دقیقاً مثل خواندن چارت از چپ
+        به راست).
+        """
+        return self._normalized_window_shape(self.chart_window, current_candle)
+
+    def get_normalized_chart_shape_long(self, current_candle: Optional[Candle] = None) -> list[dict]:
+        """
+        همان شکل نرمال‌شدهٔ چارت بالا، اما با یک پنجرهٔ دوم و بزرگ‌تر (پیش‌فرض
+        ۲۵ کندل) - برای این‌که مدل علاوه بر الگوی نزدیک (چند کندل آخر)، بافت/
+        الگوی بزرگ‌تر بازار (مثل یک رنج یا روند چندکندلی) را هم ببیند. دقیقاً
+        همان روش نرمال‌سازی (۰ تا ۱ نسبت به های/لوی همین پنجرهٔ بزرگ‌تر)، پس
+        همچنان کاملاً مستقل از قیمت خام است.
+        """
+        return self._normalized_window_shape(self.chart_window_long, current_candle)
 
     def _swing_range(self) -> Optional[float]:
         """
@@ -449,6 +465,10 @@ class MarketStructureTracker:
         # --- شکل چارت دقیقاً مثل صفحهٔ نمایش (پنجرهٔ دیداری خود-مقیاس، بدون مرجع بیرونی) ---
         features["chart_shape_json"] = json.dumps(
             self.get_normalized_chart_shape(current_candle)
+        )
+        # پنجرهٔ دوم و بزرگ‌تر (پیش‌فرض ۲۵ کندل) برای الگوهای بزرگ‌تر/بافت کلی‌تر:
+        features["chart_shape_long_json"] = json.dumps(
+            self.get_normalized_chart_shape_long(current_candle)
         )
 
         return features
