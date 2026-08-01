@@ -23,11 +23,11 @@
        می‌توانند «بازهٔ زمانی این ردیف» را به‌جای یک الگوی بازار واقعی به مدل
        نشان دهند (سیگنالی که در معاملهٔ زنده تعمیم پیدا نمی‌کند).
 
-علاوه بر مدل اصلی (با همهٔ فیچرها)، یک مدل مقایسه‌ای دوم هم فقط با N فیچر
-مهم‌تر (طبق اهمیت فیچر مدل اول) آموزش داده می‌شود - تا با مقایسهٔ دقت این دو
-مدل، نقش واقعی «بقیهٔ فیچرها» (غیر از N تای برتر) در دقت کلی روشن شود. این
-مدل دوم فقط برای مقایسه است؛ معاملهٔ زنده (main.py) همیشه از مدل اصلی با همهٔ
-فیچرها استفاده می‌کند.
+علاوه بر مدل اصلی (با همهٔ فیچرها)، یک مدل دوم هم فقط با N فیچر مهم‌تر (طبق
+اهمیت فیچر مدل اول) آموزش داده می‌شود - تا با مقایسهٔ دقت این دو مدل، نقش
+واقعی «بقیهٔ فیچرها» (غیر از N تای برتر) در دقت کلی روشن شود. کدام یک از این
+دو مدل واقعاً در معاملهٔ زندهٔ main.py استفاده می‌شود را config.LIVE_MODEL_VARIANT
+مشخص می‌کند (نه این اسکریپت).
 
 نتیجه در چهار فایل ذخیره می‌شود:
     - data/models/pocket_option_xgb_model.json               (مدل اصلی)
@@ -53,7 +53,12 @@ from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import accuracy_score, classification_report
 
 import config
-from src.ml_features import flatten_snapshot_for_model, DIRECTION_INTERACTION_COLUMNS
+from src.ml_features import (
+    flatten_snapshot_for_model,
+    DIRECTION_INTERACTION_COLUMNS,
+    MICRO_SWING_COLUMNS,
+    chart_shape_long_current_candle_columns,
+)
 
 TOP_N_FEATURES = 25
 K_FOLDS = 5
@@ -192,18 +197,23 @@ def main() -> None:
     full_importances = print_direction_signal(X, full_model, label="(کامل)")
     top_feature_names = print_top_features(full_importances, TOP_N_FEATURES, label="(کامل)")
 
-    # فیچرهای جهت‌دار (direction_call و تعامل‌هایش) صرف‌نظر از رتبهٔ اهمیتشان
-    # به مدل مقایسه‌ای اضافه می‌شوند - چون توانایی تفکیک CALL از PUT یک نیاز
-    # عملکردی است، نه یک انتخاب اختیاری بر اساس رتبهٔ خام اهمیت. بدون این‌ها،
-    # مدل مقایسه‌ای فقط می‌تواند بگوید «این وضعیت کلی خوب است یا نه»، نه
-    # «کدام جهت را باید انتخاب کنم».
-    forced_direction_cols = [
-        c for c in DIRECTION_INTERACTION_COLUMNS if c in X.columns and c not in top_feature_names
-    ]
-    if forced_direction_cols:
-        print(f"\n(فیچرهای جهت‌دار زیر صرف‌نظر از رتبهٔ اهمیت، برای توانایی تفکیک CALL/PUT "
-              f"به مدل مقایسه‌ای اضافه شدند: {', '.join(forced_direction_cols)})")
-        top_feature_names = top_feature_names + forced_direction_cols
+    # سه دسته فیچر صرف‌نظر از رتبهٔ اهمیتشان به مدل مقایسه‌ای اضافه می‌شوند:
+    #   ۱. فیچرهای جهت‌دار (direction_call و تعامل‌هایش) - چون توانایی تفکیک
+    #      CALL از PUT یک نیاز عملکردی است، نه یک انتخاب اختیاری بر اساس رتبه.
+    #      بدون این‌ها، مدل فقط می‌تواند بگوید «این وضعیت کلی خوب است یا نه»،
+    #      نه «کدام جهت را باید انتخاب کنم».
+    #   ۲. فیچرهای «نوسان ریز» (Micro-Swing) - یک خانوادهٔ به‌هم‌مرتبط که در
+    #      ترین‌های مختلف، اعضای متفاوتی از آن در فیچرهای برتر ظاهر شده‌اند.
+    #   ۳. آخرین کندل در پنجرهٔ بلندِ شکل چارت - در آخرین ترین ثابت شد سیگنال
+    #      واقعی دارد (رتبهٔ ۲ و ۷ اهمیت).
+    # هدف: نوسان رتبهٔ خام اهمیت بین اجراهای مختلف، این فیچرهای اثبات‌شده را
+    # اتفاقی از مدل مقایسه‌ای حذف نکند.
+    forced_columns = DIRECTION_INTERACTION_COLUMNS | MICRO_SWING_COLUMNS | chart_shape_long_current_candle_columns()
+    forced_extra_cols = [c for c in forced_columns if c in X.columns and c not in top_feature_names]
+    if forced_extra_cols:
+        print(f"\n(فیچرهای زیر صرف‌نظر از رتبهٔ اهمیت - جهت‌دار/نوسان ریز/کندل جاری در پنجرهٔ بلند - "
+              f"به مدل مقایسه‌ای اضافه شدند: {', '.join(forced_extra_cols)})")
+        top_feature_names = top_feature_names + forced_extra_cols
 
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
     full_model.save_model(str(config.MODEL_JSON_PATH))
@@ -213,12 +223,13 @@ def main() -> None:
     print(f"Feature list saved to {config.MODEL_FEATURES_PATH}")
 
     # =========================================================================
-    # مدل مقایسه‌ای: TOP_N_FEATURES فیچر مهم‌تر + فیچرهای جهت‌دار اجباری
+    # مدل مقایسه‌ای: TOP_N_FEATURES فیچر مهم‌تر + فیچرهای اجباری (جهت‌دار/
+    # نوسان ریز/کندل جاری در پنجرهٔ بلند)
     # هدف: با مقایسهٔ دقت این مدل با مدل کامل، نقش واقعی بقیهٔ فیچرها (غیر از
-    # این مجموعه) در دقت کلی مشخص شود - نه استفادهٔ زنده در معامله.
+    # این مجموعه) در دقت کلی مشخص شود.
     # =========================================================================
     top_count = len(top_feature_names)
-    top_label = f"({top_count} فیچر: {TOP_N_FEATURES} برتر + جهت‌دار اجباری)"
+    top_label = f"({top_count} فیچر: {TOP_N_FEATURES} برتر + اجباری)"
     print("\n\n==========================================================")
     print(f"مدل مقایسه‌ای: {top_label}")
     print("==========================================================")
