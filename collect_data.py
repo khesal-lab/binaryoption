@@ -41,6 +41,7 @@ from src.data_logger import DataLogger
 from src.trade_click_listener import attach_trade_button_listeners
 from src.trade_executor import click_trade_button
 from src.level_strategy import LevelStrategyTracker
+from src.symbol_tracker import SymbolSwitchDetector
 
 
 async def tick_consumer_and_strategy_task(
@@ -60,12 +61,30 @@ async def tick_consumer_and_strategy_task(
     سطوح را هم بررسی می‌کند و در صورت سیگنال، دکمهٔ واقعی BUY/SELL را کلیک
     می‌کند. مقایسهٔ تیک فعلی با تیک قبلی برای تشخیص «عبور از سطح» لازم است،
     پس تیک قبلی این‌جا نگه داشته می‌شود.
+
+    اگر کاربر نماد معاملاتی را دستی در پلتفرم عوض کند، SymbolSwitchDetector
+    این تغییر را از روی symbol تیک‌های ورودی تشخیص می‌دهد و علاوه بر بافرهای
+    قیمتی/ساختار بازار، استراتژی سطوح (level_tracker) هم ریست می‌شود و
+    prev_tick پاک می‌شود - وگرنه اولین مقایسهٔ بعد از تعویض نماد، تیک نماد
+    جدید را با تیک نماد قدیمی (با سطح قیمتی کاملاً بی‌ربط) مقایسه می‌کند.
     """
     last_click_monotonic = 0.0
     prev_tick = None
+    symbol_detector = SymbolSwitchDetector()
 
     while True:
         tick = await tick_queue.get()
+
+        if symbol_detector.check(tick.symbol):
+            print(f"[CollectData] تغییر نماد شناسایی شد (نماد جدید: {tick.symbol}) - "
+                  f"بافرهای قیمتی، ساختار بازار و استراتژی سطوح ریست شدند.")
+            tick_buffer.reset()
+            tick_history.reset()
+            candle_aggregator.reset()
+            market_structure.reset()
+            level_tracker.reset()
+            prev_tick = None
+
         tick_buffer.add(tick)
         tick_history.add(tick)
         closed_candle = candle_aggregator.add_tick(tick)
@@ -90,13 +109,20 @@ async def hotkey_listener_task(data_logger: DataLogger, stop_event: asyncio.Even
     loop = asyncio.get_event_loop()
     print("\nحالت جمع‌آوری داده با استراتژی تست حمایت/مقاومت فعال است.")
     print("این اسکریپت خودش روی سطوح تشخیص‌داده‌شده معامله باز می‌کند؛ نیازی به کلیک شما نیست.")
+    print("'resume' + Enter برای فعال‌کردن دوبارهٔ معاملهٔ خودکار بعد از توقف به‌خاطر پی‌آوت پایین "
+          "(بدون نیاز به ری‌استارت - مثلاً بعد از تغییر دستی ارز)")
     print("'r' + Enter برای پاک‌کردن کامل دیتاست و شروع از صفر | 'q' + Enter برای خروج\n")
 
     while not stop_event.is_set():
         user_input = await loop.run_in_executor(None, input, "> ")
         command = user_input.strip().lower()
 
-        if command == "r":
+        if command == "resume":
+            if data_logger.resume_trading():
+                print("[CollectData] معاملهٔ خودکار دوباره فعال شد.")
+            else:
+                print("[CollectData] معاملهٔ خودکار همین الان هم متوقف نبوده است.")
+        elif command == "r":
             print("⚠️  این کار کل دیتاست (CSV و SQLite) را برای همیشه پاک می‌کند.")
             confirm = await loop.run_in_executor(
                 None, input, "برای تأیید 'yes' را تایپ کنید (هر چیز دیگری = لغو): "
@@ -109,7 +135,7 @@ async def hotkey_listener_task(data_logger: DataLogger, stop_event: asyncio.Even
             print("[CollectData] درخواست خروج دریافت شد...")
             stop_event.set()
         else:
-            print("ورودی نامعتبر. از 'r' یا 'q' استفاده کنید.")
+            print("ورودی نامعتبر. از 'resume'، 'r' یا 'q' استفاده کنید.")
 
 
 async def connection_watchdog_task(

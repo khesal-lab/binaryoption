@@ -40,6 +40,7 @@ from src.data_logger import DataLogger
 from src.trade_click_listener import attach_trade_button_listeners
 from src.trade_executor import click_trade_button
 from src.live_predictor import LivePredictor
+from src.symbol_tracker import SymbolSwitchDetector
 
 
 async def tick_consumer_task(
@@ -54,9 +55,25 @@ async def tick_consumer_task(
     هر بار که یک کندل یک‌دقیقه‌ای بسته شود، همان کندل به MarketStructureTracker
     داده می‌شود تا سوئینگ/لگ/حمایت‌مقاومت/روند را به‌روزرسانی کند.
     این حلقه باید همیشه سریع باشد تا هیچ تأخیری روی داده‌های real-time نیفتد.
+
+    اگر کاربر نماد معاملاتی را دستی در پلتفرم عوض کند، تیک‌های جدید symbol
+    متفاوتی خواهند داشت - SymbolSwitchDetector این تغییر را تشخیص می‌دهد و
+    تمام بافرهای قیمتی/ساختار بازار (که بر مبنای نماد قبلی ساخته شده‌اند)
+    ریست می‌شوند، وگرنه فیچرهای بعدی ترکیبی از دو نماد بی‌ربط می‌شوند.
     """
+    symbol_detector = SymbolSwitchDetector()
+
     while True:
         tick = await tick_queue.get()
+
+        if symbol_detector.check(tick.symbol):
+            print(f"[Main] تغییر نماد شناسایی شد (نماد جدید: {tick.symbol}) - "
+                  f"بافرهای قیمتی و ساختار بازار ریست شدند.")
+            tick_buffer.reset()
+            tick_history.reset()
+            candle_aggregator.reset()
+            market_structure.reset()
+
         tick_buffer.add(tick)
         tick_history.add(tick)
         closed_candle = candle_aggregator.add_tick(tick)
@@ -74,6 +91,8 @@ async def hotkey_listener_task(data_logger: DataLogger, stop_event: asyncio.Even
     loop = asyncio.get_event_loop()
     print("\nراهنما: حالا می‌توانید مثل همیشه روی BUY/SELL در پلتفرم کلیک کنید و خودکار ثبت می‌شود.")
     print("جایگزین دستی: 'c' + Enter برای CALL | 'p' + Enter برای PUT")
+    print("'resume' + Enter برای فعال‌کردن دوبارهٔ معاملهٔ خودکار بعد از توقف به‌خاطر پی‌آوت پایین "
+          "(بدون نیاز به ری‌استارت - مثلاً بعد از تغییر دستی ارز)")
     print("'r' + Enter برای پاک‌کردن کامل دیتاست و شروع از صفر | 'q' + Enter برای خروج\n")
 
     while not stop_event.is_set():
@@ -84,6 +103,11 @@ async def hotkey_listener_task(data_logger: DataLogger, stop_event: asyncio.Even
             data_logger.capture_entry("CALL")
         elif command == "p":
             data_logger.capture_entry("PUT")
+        elif command == "resume":
+            if data_logger.resume_trading():
+                print("[Main] معاملهٔ خودکار دوباره فعال شد.")
+            else:
+                print("[Main] معاملهٔ خودکار همین الان هم متوقف نبوده است.")
         elif command == "r":
             print("⚠️  این کار کل دیتاست (CSV و SQLite) را برای همیشه پاک می‌کند.")
             confirm = await loop.run_in_executor(
@@ -97,7 +121,7 @@ async def hotkey_listener_task(data_logger: DataLogger, stop_event: asyncio.Even
             print("[Main] درخواست خروج دریافت شد...")
             stop_event.set()
         else:
-            print("ورودی نامعتبر. از 'c'، 'p'، 'r' یا 'q' استفاده کنید.")
+            print("ورودی نامعتبر. از 'c'، 'p'، 'resume'، 'r' یا 'q' استفاده کنید.")
 
 
 async def connection_watchdog_task(
