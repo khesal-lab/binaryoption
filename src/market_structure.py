@@ -101,6 +101,17 @@ class MarketStructureTracker:
         self._last_confirmed_index: int = -1
         self._candle_counter: int = -1  # اندیس افزایشی کل کندل‌های دیده‌شده
 
+    def reset(self) -> None:
+        """
+        کل تاریخچهٔ کندل/سوئینگ را پاک می‌کند - مثلاً وقتی نماد معاملاتی عوض
+        شده و ساختار بازار قبلی (سوئینگ/لگ/حمایت‌مقاومت) دیگر به این نماد
+        جدید ربطی ندارد.
+        """
+        self.candles.clear()
+        self.swing_points.clear()
+        self._last_confirmed_index = -1
+        self._candle_counter = -1
+
     # -- ورودی: هر بار یک کندل تکمیل شود این متد صدا زده می‌شود ------------------
     def ingest_closed_candle(self, candle: Candle) -> None:
         self.candles.append(candle)

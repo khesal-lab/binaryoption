@@ -54,6 +54,10 @@ class TickBuffer:
     def add(self, tick: Tick) -> None:
         self.buffer.append(tick)
 
+    def reset(self) -> None:
+        """خالی‌کردن کامل بافر - مثلاً وقتی نماد معاملاتی عوض شده و تیک‌های قبلی دیگر معتبر نیستند."""
+        self.buffer.clear()
+
     def is_ready(self, min_points: int = 2) -> bool:
         return len(self.buffer) >= min_points
 
@@ -194,6 +198,10 @@ class TickHistory:
 
     def add(self, tick: Tick) -> None:
         self.buffer.append(tick)
+
+    def reset(self) -> None:
+        """خالی‌کردن کامل بافر - مثلاً وقتی نماد معاملاتی عوض شده و تیک‌های قبلی دیگر معتبر نیستند."""
+        self.buffer.clear()
 
     def _pct_returns(self) -> list[float]:
         ticks = list(self.buffer)
@@ -546,6 +554,15 @@ class CandleAggregator:
         self.history: deque[Candle] = deque(maxlen=history_size)
         self.current: Optional[Candle] = None
         self._current_bucket: Optional[int] = None
+
+    def reset(self) -> None:
+        """
+        تاریخچهٔ کندل‌ها و کندل در حال شکل‌گیری را کامل پاک می‌کند - مثلاً وقتی
+        نماد معاملاتی عوض شده و کندل‌های قبلی مربوط به یک نماد دیگرند.
+        """
+        self.history.clear()
+        self.current = None
+        self._current_bucket = None
 
     def add_tick(self, tick: Tick) -> Optional[Candle]:
         bucket = int(tick.timestamp // self.timeframe_seconds)

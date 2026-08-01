@@ -42,6 +42,10 @@ class LevelStrategyTracker:
         """با شروع کندل جدید، تمام سطوح معامله‌شده پاک می‌شوند."""
         self._traded_levels = []
 
+    def reset(self) -> None:
+        """مثل on_new_candle، اما برای مواقعی که کندل قبلی اصلاً معتبر نیست (مثلاً تعویض نماد)."""
+        self._traded_levels = []
+
     def check_signal(
         self,
         prev_tick: Optional[Tick],

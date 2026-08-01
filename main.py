@@ -40,6 +40,7 @@ from src.data_logger import DataLogger
 from src.trade_click_listener import attach_trade_button_listeners
 from src.trade_executor import click_trade_button
 from src.live_predictor import LivePredictor
+from src.symbol_tracker import SymbolSwitchDetector
 
 
 async def tick_consumer_task(
@@ -54,9 +55,25 @@ async def tick_consumer_task(
     هر بار که یک کندل یک‌دقیقه‌ای بسته شود، همان کندل به MarketStructureTracker
     داده می‌شود تا سوئینگ/لگ/حمایت‌مقاومت/روند را به‌روزرسانی کند.
     این حلقه باید همیشه سریع باشد تا هیچ تأخیری روی داده‌های real-time نیفتد.
+
+    اگر کاربر نماد معاملاتی را دستی در پلتفرم عوض کند، تیک‌های جدید symbol
+    متفاوتی خواهند داشت - SymbolSwitchDetector این تغییر را تشخیص می‌دهد و
+    تمام بافرهای قیمتی/ساختار بازار (که بر مبنای نماد قبلی ساخته شده‌اند)
+    ریست می‌شوند، وگرنه فیچرهای بعدی ترکیبی از دو نماد بی‌ربط می‌شوند.
     """
+    symbol_detector = SymbolSwitchDetector()
+
     while True:
         tick = await tick_queue.get()
+
+        if symbol_detector.check(tick.symbol):
+            print(f"[Main] تغییر نماد شناسایی شد (نماد جدید: {tick.symbol}) - "
+                  f"بافرهای قیمتی و ساختار بازار ریست شدند.")
+            tick_buffer.reset()
+            tick_history.reset()
+            candle_aggregator.reset()
+            market_structure.reset()
+
         tick_buffer.add(tick)
         tick_history.add(tick)
         closed_candle = candle_aggregator.add_tick(tick)

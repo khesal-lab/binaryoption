@@ -41,6 +41,7 @@ from src.data_logger import DataLogger
 from src.trade_click_listener import attach_trade_button_listeners
 from src.trade_executor import click_trade_button
 from src.level_strategy import LevelStrategyTracker
+from src.symbol_tracker import SymbolSwitchDetector
 
 
 async def tick_consumer_and_strategy_task(
@@ -60,12 +61,30 @@ async def tick_consumer_and_strategy_task(
     سطوح را هم بررسی می‌کند و در صورت سیگنال، دکمهٔ واقعی BUY/SELL را کلیک
     می‌کند. مقایسهٔ تیک فعلی با تیک قبلی برای تشخیص «عبور از سطح» لازم است،
     پس تیک قبلی این‌جا نگه داشته می‌شود.
+
+    اگر کاربر نماد معاملاتی را دستی در پلتفرم عوض کند، SymbolSwitchDetector
+    این تغییر را از روی symbol تیک‌های ورودی تشخیص می‌دهد و علاوه بر بافرهای
+    قیمتی/ساختار بازار، استراتژی سطوح (level_tracker) هم ریست می‌شود و
+    prev_tick پاک می‌شود - وگرنه اولین مقایسهٔ بعد از تعویض نماد، تیک نماد
+    جدید را با تیک نماد قدیمی (با سطح قیمتی کاملاً بی‌ربط) مقایسه می‌کند.
     """
     last_click_monotonic = 0.0
     prev_tick = None
+    symbol_detector = SymbolSwitchDetector()
 
     while True:
         tick = await tick_queue.get()
+
+        if symbol_detector.check(tick.symbol):
+            print(f"[CollectData] تغییر نماد شناسایی شد (نماد جدید: {tick.symbol}) - "
+                  f"بافرهای قیمتی، ساختار بازار و استراتژی سطوح ریست شدند.")
+            tick_buffer.reset()
+            tick_history.reset()
+            candle_aggregator.reset()
+            market_structure.reset()
+            level_tracker.reset()
+            prev_tick = None
+
         tick_buffer.add(tick)
         tick_history.add(tick)
         closed_candle = candle_aggregator.add_tick(tick)
