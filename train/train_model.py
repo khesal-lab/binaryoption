@@ -180,6 +180,20 @@ def main() -> None:
               f"({min_direction_count} از {len(df)}). مدل احتمالاً نمی‌تواند برای آن جهت "
               f"سیگنال معتبری یاد بگیرد - سعی کنید معاملات هر دو جهت را متعادل‌تر جمع‌آوری کنید.")
 
+    # --- توزیع منبع معاملات (دستی / level_strategy / bot) ---------------------
+    # معاملات bot را خودِ یک مدل قبلی (با آستانهٔ اطمینان) انتخاب کرده، نه یک
+    # نمونهٔ بی‌طرف از بازار - پس می‌توانند باعث شوند مدل جدید صرفاً باور مدل
+    # قبلی را در خودش تقویت کند (Selection Bias / حلقهٔ بازخورد)، نه یک الگوی
+    # مستقل و جدید یاد بگیرد. این‌جا سهم هر منبع را همیشه قابل‌مشاهده می‌کنیم.
+    source_series = (
+        df["meta_trade_source"].fillna("manual") if "meta_trade_source" in df.columns
+        else pd.Series("manual", index=df.index)
+    )
+    print("\n--- توزیع منبع معاملات (دستی/level_strategy/bot) ---")
+    for source, count in source_series.value_counts().items():
+        source_winrate = y_all[source_series == source].mean()
+        print(f"  {source}: {count} معامله، وین‌ریت {source_winrate:.1%}")
+
     records = df.drop(columns=["result"]).to_dict(orient="records")
     flattened_rows = [flatten_snapshot_for_model(row) for row in records]
 
@@ -221,6 +235,42 @@ def main() -> None:
         json.dump(list(X.columns), f, ensure_ascii=False, indent=2)
     print(f"\nModel saved to {config.MODEL_JSON_PATH}")
     print(f"Feature list saved to {config.MODEL_FEATURES_PATH}")
+
+    # =========================================================================
+    # آزمایش تشخیصی: مدل کامل بدون معاملات bot
+    # هدف: معاملات bot را خودِ یک مدل قبلی (با آستانهٔ اطمینان) انتخاب کرده،
+    # نه یک نمونهٔ بی‌طرف از بازار - پس ممکن است دقتِ بالای مدل کامل (نسبت به
+    # baseline خام) صرفاً بازتاب/تقویتِ باور همان مدل قبلی باشد، نه یک الگوی
+    # مستقل و جدید بازار. این مدل فقط برای مقایسه چاپ می‌شود؛ ذخیره یا در
+    # معاملهٔ زنده استفاده نمی‌شود.
+    # =========================================================================
+    non_bot_mask = source_series.values != "bot"
+    baseline_winrate = float(y.mean())
+    print(f"\n\nوین‌ریت خام کل داده (baseline - فرض «همیشه برنده است»): {baseline_winrate * 100:.2f}%")
+
+    if 0 < non_bot_mask.sum() < len(y) and non_bot_mask.sum() >= 50:
+        print("\n==========================================================")
+        print(f"آزمایش تشخیصی: مدل کامل بدون معاملات bot ({int(non_bot_mask.sum())} از {len(y)} ردیف)")
+        print("==========================================================")
+        X_non_bot = X[non_bot_mask]
+        y_non_bot = y[non_bot_mask]
+        non_bot_baseline = float(y_non_bot.mean())
+        print(f"وین‌ریت خام دادهٔ بدون bot: {non_bot_baseline * 100:.2f}%")
+
+        non_bot_kfold_mean, non_bot_kfold_std = run_kfold_cv(
+            X_non_bot, y_non_bot, label="(کامل - بدون bot)"
+        )
+        gap = (non_bot_kfold_mean - full_kfold_mean) * 100
+        print(f"\nمقایسه با مدل کامل (با همهٔ منابع، {full_kfold_mean * 100:.2f}%): {gap:+.2f} واحد درصد")
+        if gap < -1.0:
+            print("⚠️  دقت مدل بدون معاملات bot به‌طور محسوسی پایین‌تر است - یعنی بخشی از دقت "
+                  "دیده‌شده در مدل کامل ممکن است ناشی از حلقهٔ بازخورد با یک مدل قبلی باشد، نه "
+                  "یک الگوی مستقل و جدید بازار. برای اطمینان، فعلاً دادهٔ بیشتری با collect_data.py "
+                  "(یا معاملهٔ دستی) جمع کنید تا سهم bot در دیتاست کم‌رنگ‌تر شود.")
+        else:
+            print("تفاوت محسوس منفی دیده نمی‌شود - دقت مدل کامل به دادهٔ bot وابسته به‌نظر نمی‌رسد.")
+    else:
+        print("\n(داده‌ای برای آزمایش «بدون bot» کافی نیست یا اصلاً معاملهٔ bot ثبت نشده.)")
 
     # =========================================================================
     # مدل مقایسه‌ای: TOP_N_FEATURES فیچر مهم‌تر + فیچرهای اجباری (جهت‌دار/
