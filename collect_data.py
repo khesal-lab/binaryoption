@@ -184,8 +184,10 @@ async def main() -> None:
     data_logger = DataLogger(
         tick_buffer, tick_history, candle_aggregator, market_structure, trade_history, deal_buffer, page=page
     )
+    await data_logger.install_page_controls()
     print(f"[CollectData] نظارت پی‌آوت فعال: اگر پی‌آوت واقعیِ یک معامله کمتر از "
           f"{config.MIN_PAYOUT_PERCENT}٪ باشد، معاملهٔ خودکار این اسکریپت متوقف می‌شود.")
+    print("[CollectData] یک دکمهٔ «توقف/ازسرگیری معاملهٔ خودکار» هم پایین-چپ صفحهٔ مرورگر اضافه شد.")
 
     # وقتی استراتژی دکمه را برنامه‌ای کلیک می‌کند، درست قبل از کلیک این مقدار
     # به "level_strategy" تغییر می‌کند تا شنوندهٔ کلیک زیر بداند این معامله را

@@ -163,6 +163,10 @@ class DataLogger:
         # قبل از هر کلیک برنامه‌ای این پرچم را بررسی می‌کنند و در صورت True،
         # دیگر معامله‌ای باز نمی‌کنند - معاملهٔ دستی خودِ شما هرگز مسدود نمی‌شود.
         self.trading_paused = False
+        # چند معاملهٔ متوالی (که پی‌آوتشان قابل تشخیص بود) زیر آستانه بوده‌اند؟
+        # برای جلوگیری از توقف اشتباهی به‌خاطر یک خوانش نادرست تکی (تشخیص
+        # heuristic پی‌آوت گاهی ممکن است رکورد معاملهٔ دیگری را بگیرد).
+        self._low_payout_streak = 0
 
         self._init_sqlite()
 
@@ -283,12 +287,23 @@ class DataLogger:
 
         self._append_row(row)
 
-        if payout_percent is not None and payout_percent < config.MIN_PAYOUT_PERCENT and not self.trading_paused:
-            self.trading_paused = True
-            print(f"[DataLogger] ⚠️ پی‌آوت واقعی این معامله {payout_percent:.1f}٪ بود - کمتر از حد "
-                  f"مجاز {config.MIN_PAYOUT_PERCENT}٪. معاملهٔ برنامه‌ای (خودکار) از این لحظه متوقف "
-                  f"شد؛ معاملهٔ دستی شما همچنان آزاد است.")
-            asyncio.create_task(self._show_low_payout_banner(payout_percent))
+        if payout_percent is not None:
+            if payout_percent < config.MIN_PAYOUT_PERCENT:
+                self._low_payout_streak += 1
+                if self._low_payout_streak < config.LOW_PAYOUT_CONFIRM_TRADES:
+                    print(f"[DataLogger] پی‌آوت این معامله {payout_percent:.1f}٪ بود (کمتر از حد مجاز "
+                          f"{config.MIN_PAYOUT_PERCENT}٪) - در انتظار تأیید با معاملهٔ بعدی قبل از توقف "
+                          f"({self._low_payout_streak}/{config.LOW_PAYOUT_CONFIRM_TRADES}).")
+                elif not self.trading_paused:
+                    self.trading_paused = True
+                    print(f"[DataLogger] ⚠️ پی‌آوت واقعی {config.LOW_PAYOUT_CONFIRM_TRADES} معاملهٔ متوالی "
+                          f"زیر حد مجاز {config.MIN_PAYOUT_PERCENT}٪ بود (آخرین مقدار: {payout_percent:.1f}٪). "
+                          f"معاملهٔ برنامه‌ای (خودکار) از این لحظه متوقف شد؛ معاملهٔ دستی شما همچنان آزاد است.")
+                    asyncio.create_task(self._show_low_payout_banner(payout_percent))
+                    asyncio.create_task(self._sync_toggle_button())
+            else:
+                # یک معاملهٔ واقعاً با پی‌آوت خوب، هر زنجیرهٔ قبلیِ خوانش‌های کم را باطل می‌کند.
+                self._low_payout_streak = 0
 
         outcome_text = "WIN ✅" if result == 1 else "LOSS ❌"
         lifetime_total = self._lifetime_trade_count()
@@ -374,8 +389,84 @@ class DataLogger:
         if not self.trading_paused:
             return False
         self.trading_paused = False
+        self._low_payout_streak = 0
         asyncio.create_task(self._hide_low_payout_banner())
+        asyncio.create_task(self._sync_toggle_button())
         return True
+
+    # -- دکمهٔ توقف/ازسرگیری روی خودِ صفحهٔ مرورگر -------------------------------
+    async def install_page_controls(self) -> None:
+        """
+        یک دکمهٔ شناور «توقف/ازسرگیری معاملهٔ خودکار» مستقیماً روی صفحهٔ مرورگر
+        تزریق می‌کند - برای این‌که نیازی به تایپ دستور در ترمینال نباشد. باید
+        دقیقاً یک‌بار، بعد از ساخت DataLogger با page واقعی، await شود (مثلاً
+        در main() اسکریپت). اگر page در دسترس نباشد، بی‌اثر برمی‌گردد.
+        """
+        if self.page is None:
+            return
+
+        await self.page.expose_function("pocketBotToggleTrading", self._toggle_trading_from_page)
+
+        js = """
+        () => {
+            let btn = document.getElementById('__trading_toggle_btn__');
+            if (btn) return;
+            btn = document.createElement('button');
+            btn.id = '__trading_toggle_btn__';
+            btn.type = 'button';
+            btn.textContent = '⏸ توقف معاملهٔ خودکار';
+            btn.style.cssText = 'position:fixed;bottom:12px;left:12px;z-index:2147483647;' +
+                'padding:8px 16px;border:none;border-radius:6px;font:bold 14px sans-serif;' +
+                'cursor:pointer;color:#fff;background:#34495e;direction:rtl;box-shadow:0 2px 8px rgba(0,0,0,.3);';
+            btn.onclick = async () => {
+                btn.disabled = true;
+                try {
+                    const paused = await window.pocketBotToggleTrading();
+                    btn.textContent = paused ? '▶ ازسرگیری معاملهٔ خودکار' : '⏸ توقف معاملهٔ خودکار';
+                    btn.style.background = paused ? '#27ae60' : '#34495e';
+                } finally {
+                    btn.disabled = false;
+                }
+            };
+            document.body.appendChild(btn);
+        }
+        """
+        try:
+            await self.page.evaluate(js)
+        except Exception as exc:  # noqa: BLE001 - نباید راه‌اندازی برنامه را مختل کند
+            print(f"[DataLogger] هشدار: افزودن دکمهٔ توقف/ازسرگیری ناموفق بود: {exc}")
+
+    async def _toggle_trading_from_page(self) -> bool:
+        """
+        از طریق دکمهٔ روی صفحه صدا زده می‌شود (با page.expose_function). وضعیت
+        توقف را toggle می‌کند و در صورت ازسرگیری، بنر پی‌آوت را هم مخفی می‌کند.
+        مقدار جدید trading_paused را برمی‌گرداند تا خودِ دکمه برچسبش را عوض کند.
+        """
+        self.trading_paused = not self.trading_paused
+        action = "متوقف" if self.trading_paused else "دوباره فعال"
+        print(f"[DataLogger] معاملهٔ خودکار از طریق دکمهٔ روی صفحه {action} شد.")
+        if self.trading_paused:
+            self._low_payout_streak = 0
+        else:
+            await self._hide_low_payout_banner()
+        return self.trading_paused
+
+    async def _sync_toggle_button(self) -> None:
+        """برچسب/رنگ دکمهٔ روی صفحه را با self.trading_paused هماهنگ می‌کند (وقتی تغییر از مسیر دیگری - نه خودِ دکمه - اتفاق افتاده)."""
+        if self.page is None:
+            return
+        js = """
+        (paused) => {
+            const btn = document.getElementById('__trading_toggle_btn__');
+            if (!btn) return;
+            btn.textContent = paused ? '▶ ازسرگیری معاملهٔ خودکار' : '⏸ توقف معاملهٔ خودکار';
+            btn.style.background = paused ? '#27ae60' : '#34495e';
+        }
+        """
+        try:
+            await self.page.evaluate(js, self.trading_paused)
+        except Exception as exc:  # noqa: BLE001 - نباید ادامهٔ برنامه را مختل کند
+            print(f"[DataLogger] هشدار: هماهنگ‌سازی دکمهٔ توقف/ازسرگیری ناموفق بود: {exc}")
 
     def _lifetime_trade_count(self) -> int:
         """
