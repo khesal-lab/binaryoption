@@ -93,6 +93,35 @@ def _interpret_deal_candidate(deal: dict) -> Optional[int]:
     return None
 
 
+def _extract_payout_percent(raw_deal: Optional[dict], result: int) -> Optional[float]:
+    """
+    درصد پی‌آوت واقعیِ همین معامله را از روی پیام «نتیجهٔ معامله» خودِ پلتفرم
+    (نه نمایش صفحه) تخمین می‌زند:
+        ۱. اگر خودِ پیام یک کلید صریح "payout" داشته باشد، همان استفاده می‌شود
+           (هم فرمت ۰ تا ۱ مثل ۰.۹۲ و هم فرمت ۰ تا ۱۰۰ مثل ۹۲ پشتیبانی می‌شود).
+        ۲. وگرنه، فقط در معاملات بُرد، از نسبت profit/amount محاسبه می‌شود
+           (چون در باخت این نسبت چیزی دربارهٔ پی‌آوت نمی‌گوید - کل مبلغ از
+           دست می‌رود، نه نسبتی از آن).
+    اگر هیچ‌کدام در دسترس نبود، None برمی‌گرداند (یعنی این معامله قابل بررسی
+    از نظر پی‌آوت نیست).
+    """
+    if raw_deal is None:
+        return None
+    lower_map = {str(k).lower(): v for k, v in raw_deal.items()}
+
+    if "payout" in lower_map and isinstance(lower_map["payout"], (int, float)):
+        value = float(lower_map["payout"])
+        return value * 100 if value <= 1.5 else value
+
+    if result == 1:
+        profit = lower_map.get("profit")
+        amount = lower_map.get("amount")
+        if isinstance(profit, (int, float)) and isinstance(amount, (int, float)) and amount > 0:
+            return (profit / amount) * 100
+
+    return None
+
+
 class DataLogger:
     """
     مسئول ثبت لحظهٔ ورود به معامله، صبر تا انقضا، لیبل‌گذاری نتیجه و
@@ -107,6 +136,7 @@ class DataLogger:
         market_structure: MarketStructureTracker,
         trade_history: TradeHistory,
         deal_buffer: Optional[DealResultBuffer] = None,
+        page=None,
         csv_path=config.CSV_LOG_PATH,
         sqlite_path=config.SQLITE_DB_PATH,
         expiry_seconds: float = config.TRADE_EXPIRY_SECONDS,
@@ -118,6 +148,9 @@ class DataLogger:
         self.market_structure = market_structure
         self.trade_history = trade_history
         self.deal_buffer = deal_buffer
+        # برای نمایش بنر هشدار پی‌آوت پایین مستقیماً روی صفحهٔ مرورگر (اختیاری -
+        # اگر داده نشود، فقط در ترمینال هشدار داده می‌شود).
+        self.page = page
         self.csv_path = csv_path
         self.sqlite_path = sqlite_path
         self.expiry_seconds = expiry_seconds
@@ -125,6 +158,11 @@ class DataLogger:
         # وین‌ریت جداگانه فقط برای معاملاتی که خودِ ربات (نه کاربر) باز کرده،
         # تا بشود عملکرد لحظه‌ای مدل را مستقل از معاملات دستی دنبال کرد.
         self.bot_trade_history = TradeHistory()
+        # وقتی پی‌آوت واقعیِ یک معامله از config.MIN_PAYOUT_PERCENT کمتر باشد،
+        # این پرچم True می‌شود. اسکریپت‌های فراخوان (collect_data.py/main.py)
+        # قبل از هر کلیک برنامه‌ای این پرچم را بررسی می‌کنند و در صورت True،
+        # دیگر معامله‌ای باز نمی‌کنند - معاملهٔ دستی خودِ شما هرگز مسدود نمی‌شود.
+        self.trading_paused = False
 
         self._init_sqlite()
 
@@ -223,6 +261,8 @@ class DataLogger:
         if pending.source != "manual":
             self.bot_trade_history.add_result(result)
 
+        payout_percent = _extract_payout_percent(raw_deal, result)
+
         row = dict(pending.feature_snapshot)
         # ستون‌های meta_* فقط برای ردیابی/دیباگ‌اند؛ مقدار خام قیمت دارند و
         # نباید به‌عنوان ورودی مدل استفاده شوند.
@@ -232,6 +272,7 @@ class DataLogger:
         row["meta_exit_price"] = exit_price
         row["meta_exit_timestamp"] = exit_timestamp
         row["meta_raw_deal_json"] = json.dumps(raw_deal) if raw_deal is not None else None
+        row["meta_payout_percent"] = payout_percent
         # تنها ویژگی نسبی مشتق از ورود/خروج (قابل استفاده در تحلیل، نه لزوماً در مدل):
         row["price_change_pct"] = (
             (exit_price - pending.entry_price) / pending.entry_price if pending.entry_price else None
@@ -241,6 +282,13 @@ class DataLogger:
         row["result"] = result  # Win = 1 / Loss = 0  <-- لیبل نهایی برای آموزش مدل
 
         self._append_row(row)
+
+        if payout_percent is not None and payout_percent < config.MIN_PAYOUT_PERCENT and not self.trading_paused:
+            self.trading_paused = True
+            print(f"[DataLogger] ⚠️ پی‌آوت واقعی این معامله {payout_percent:.1f}٪ بود - کمتر از حد "
+                  f"مجاز {config.MIN_PAYOUT_PERCENT}٪. معاملهٔ برنامه‌ای (خودکار) از این لحظه متوقف "
+                  f"شد؛ معاملهٔ دستی شما همچنان آزاد است.")
+            asyncio.create_task(self._show_low_payout_banner(payout_percent))
 
         outcome_text = "WIN ✅" if result == 1 else "LOSS ❌"
         lifetime_total = self._lifetime_trade_count()
@@ -255,6 +303,38 @@ class DataLogger:
             print(f"[DataLogger] وین‌ریت زندهٔ ربات ({pending.source}): "
                   f"{self.bot_trade_history.get_rolling_winrate():.2%} "
                   f"روی {self.bot_trade_history.total_trades()} معاملهٔ خودکار")
+
+    async def _show_low_payout_banner(self, payout_percent: float) -> None:
+        """
+        یک بنر قرمز ثابت بالای خودِ صفحهٔ مرورگر تزریق می‌کند (نه فقط ترمینال)
+        تا افت پی‌آوت حتی وقتی کاربر ترمینال را زیر نظر ندارد هم قابل‌دیدن باشد.
+        اگر page در دسترس نباشد (مثلاً هنگام تست)، فقط از این تابع بی‌اثر برمی‌گردد.
+        """
+        if self.page is None:
+            return
+        message = (
+            f"⚠️ پی‌آوت به {payout_percent:.1f}٪ افت کرد (کمتر از حد مجاز "
+            f"{config.MIN_PAYOUT_PERCENT}٪) - معاملهٔ خودکار متوقف شد."
+        )
+        js = """
+        (text) => {
+            let el = document.getElementById('__low_payout_banner__');
+            if (!el) {
+                el = document.createElement('div');
+                el.id = '__low_payout_banner__';
+                el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;' +
+                    'background:#c0392b;color:#fff;font:bold 16px/1.4 sans-serif;' +
+                    'text-align:center;padding:10px;direction:rtl;';
+                document.body.appendChild(el);
+            }
+            el.textContent = text;
+            el.style.display = 'block';
+        }
+        """
+        try:
+            await self.page.evaluate(js, message)
+        except Exception as exc:  # noqa: BLE001 - نمایش بنر نباید ثبت دیتاست را مختل کند
+            print(f"[DataLogger] هشدار: نمایش بنر پی‌آوت پایین ناموفق بود: {exc}")
 
     def _lifetime_trade_count(self) -> int:
         """
