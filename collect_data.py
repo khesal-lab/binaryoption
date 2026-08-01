@@ -90,13 +90,20 @@ async def hotkey_listener_task(data_logger: DataLogger, stop_event: asyncio.Even
     loop = asyncio.get_event_loop()
     print("\nحالت جمع‌آوری داده با استراتژی تست حمایت/مقاومت فعال است.")
     print("این اسکریپت خودش روی سطوح تشخیص‌داده‌شده معامله باز می‌کند؛ نیازی به کلیک شما نیست.")
+    print("'resume' + Enter برای فعال‌کردن دوبارهٔ معاملهٔ خودکار بعد از توقف به‌خاطر پی‌آوت پایین "
+          "(بدون نیاز به ری‌استارت - مثلاً بعد از تغییر دستی ارز)")
     print("'r' + Enter برای پاک‌کردن کامل دیتاست و شروع از صفر | 'q' + Enter برای خروج\n")
 
     while not stop_event.is_set():
         user_input = await loop.run_in_executor(None, input, "> ")
         command = user_input.strip().lower()
 
-        if command == "r":
+        if command == "resume":
+            if data_logger.resume_trading():
+                print("[CollectData] معاملهٔ خودکار دوباره فعال شد.")
+            else:
+                print("[CollectData] معاملهٔ خودکار همین الان هم متوقف نبوده است.")
+        elif command == "r":
             print("⚠️  این کار کل دیتاست (CSV و SQLite) را برای همیشه پاک می‌کند.")
             confirm = await loop.run_in_executor(
                 None, input, "برای تأیید 'yes' را تایپ کنید (هر چیز دیگری = لغو): "
@@ -109,7 +116,7 @@ async def hotkey_listener_task(data_logger: DataLogger, stop_event: asyncio.Even
             print("[CollectData] درخواست خروج دریافت شد...")
             stop_event.set()
         else:
-            print("ورودی نامعتبر. از 'r' یا 'q' استفاده کنید.")
+            print("ورودی نامعتبر. از 'resume'، 'r' یا 'q' استفاده کنید.")
 
 
 async def connection_watchdog_task(

@@ -308,13 +308,16 @@ class DataLogger:
         """
         یک بنر قرمز ثابت بالای خودِ صفحهٔ مرورگر تزریق می‌کند (نه فقط ترمینال)
         تا افت پی‌آوت حتی وقتی کاربر ترمینال را زیر نظر ندارد هم قابل‌دیدن باشد.
+        یک دکمهٔ × برای بستن دستی هم دارد (فقط بنر را مخفی می‌کند - برای فعال‌
+        کردن دوباره خودِ معاملهٔ خودکار باید دستور resume را در ترمینال بزنید).
         اگر page در دسترس نباشد (مثلاً هنگام تست)، فقط از این تابع بی‌اثر برمی‌گردد.
         """
         if self.page is None:
             return
         message = (
             f"⚠️ پی‌آوت به {payout_percent:.1f}٪ افت کرد (کمتر از حد مجاز "
-            f"{config.MIN_PAYOUT_PERCENT}٪) - معاملهٔ خودکار متوقف شد."
+            f"{config.MIN_PAYOUT_PERCENT}٪) - معاملهٔ خودکار متوقف شد. "
+            f"برای فعال‌سازی دوباره، 'resume' را در ترمینال تایپ کنید."
         )
         js = """
         (text) => {
@@ -324,10 +327,25 @@ class DataLogger:
                 el.id = '__low_payout_banner__';
                 el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;' +
                     'background:#c0392b;color:#fff;font:bold 16px/1.4 sans-serif;' +
-                    'text-align:center;padding:10px;direction:rtl;';
+                    'text-align:center;padding:10px 44px;direction:rtl;';
+
+                const textSpan = document.createElement('span');
+                textSpan.id = '__low_payout_banner_text__';
+                el.appendChild(textSpan);
+
+                const closeBtn = document.createElement('button');
+                closeBtn.textContent = '×';
+                closeBtn.setAttribute('aria-label', 'Close');
+                closeBtn.style.cssText = 'position:absolute;left:12px;top:50%;' +
+                    'transform:translateY(-50%);background:transparent;border:none;' +
+                    'color:#fff;font-size:24px;font-weight:bold;cursor:pointer;' +
+                    'line-height:1;padding:0 8px;';
+                closeBtn.onclick = () => { el.style.display = 'none'; };
+                el.appendChild(closeBtn);
+
                 document.body.appendChild(el);
             }
-            el.textContent = text;
+            el.querySelector('#__low_payout_banner_text__').textContent = text;
             el.style.display = 'block';
         }
         """
@@ -335,6 +353,29 @@ class DataLogger:
             await self.page.evaluate(js, message)
         except Exception as exc:  # noqa: BLE001 - نمایش بنر نباید ثبت دیتاست را مختل کند
             print(f"[DataLogger] هشدار: نمایش بنر پی‌آوت پایین ناموفق بود: {exc}")
+
+    async def _hide_low_payout_banner(self) -> None:
+        """بنر پی‌آوت پایین را مخفی می‌کند (بعد از دستور resume)."""
+        if self.page is None:
+            return
+        js = "() => { const el = document.getElementById('__low_payout_banner__'); if (el) el.style.display = 'none'; }"
+        try:
+            await self.page.evaluate(js)
+        except Exception as exc:  # noqa: BLE001 - نباید ادامهٔ برنامه را مختل کند
+            print(f"[DataLogger] هشدار: مخفی‌کردن بنر ناموفق بود: {exc}")
+
+    def resume_trading(self) -> bool:
+        """
+        معاملهٔ برنامه‌ای متوقف‌شده (به‌خاطر پی‌آوت پایین) را دوباره فعال می‌کند،
+        بدون نیاز به ری‌استارت کل اسکریپت - مثلاً بعد از این‌که خودتان دستی ارز
+        را به نمادی با پی‌آوت بهتر تغییر داده‌اید. اگر از قبل متوقف نبوده،
+        False برمی‌گرداند (کاری برای انجام نبود).
+        """
+        if not self.trading_paused:
+            return False
+        self.trading_paused = False
+        asyncio.create_task(self._hide_low_payout_banner())
+        return True
 
     def _lifetime_trade_count(self) -> int:
         """
