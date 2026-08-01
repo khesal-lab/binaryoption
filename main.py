@@ -146,6 +146,7 @@ async def auto_trade_task(
     market_structure: MarketStructureTracker,
     trade_history: TradeHistory,
     click_source_holder: dict,
+    data_logger: DataLogger,
     stop_event: asyncio.Event,
 ) -> None:
     """
@@ -166,6 +167,9 @@ async def auto_trade_task(
 
     while not stop_event.is_set():
         await asyncio.sleep(poll_interval)
+
+        if data_logger.trading_paused:
+            continue
 
         now = time.monotonic()
         if now - last_trade_monotonic < config.AUTO_TRADE_COOLDOWN_SECONDS:
@@ -211,8 +215,10 @@ async def main() -> None:
     ws_listener.attach(page)
 
     data_logger = DataLogger(
-        tick_buffer, tick_history, candle_aggregator, market_structure, trade_history, deal_buffer
+        tick_buffer, tick_history, candle_aggregator, market_structure, trade_history, deal_buffer, page=page
     )
+    print(f"[Main] نظارت پی‌آوت فعال: اگر پی‌آوت واقعیِ یک معامله کمتر از "
+          f"{config.MIN_PAYOUT_PERCENT}٪ باشد، معاملهٔ خودکار (AUTO_TRADE) متوقف می‌شود.")
 
     # وقتی معاملهٔ خودکار (auto_trade_task) دکمه را برنامه‌ای کلیک می‌کند، درست
     # قبل از کلیک این مقدار را به "bot" تغییر می‌دهد؛ شنوندهٔ کلیک زیر که هم
@@ -257,7 +263,7 @@ async def main() -> None:
             asyncio.create_task(
                 auto_trade_task(
                     page, predictor, tick_buffer, tick_history, candle_aggregator,
-                    market_structure, trade_history, click_source_holder, stop_event,
+                    market_structure, trade_history, click_source_holder, data_logger, stop_event,
                 )
             )
         )

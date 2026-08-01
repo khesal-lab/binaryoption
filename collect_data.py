@@ -52,6 +52,7 @@ async def tick_consumer_and_strategy_task(
     level_tracker: LevelStrategyTracker,
     page,
     click_source_holder: dict,
+    data_logger: DataLogger,
 ) -> None:
     """
     نسخهٔ گسترش‌یافتهٔ tick_consumer_task اصلی (main.py): علاوه بر
@@ -73,7 +74,7 @@ async def tick_consumer_and_strategy_task(
             level_tracker.on_new_candle(closed_candle)
 
         current_candle = candle_aggregator.current
-        if current_candle is not None and prev_tick is not None:
+        if current_candle is not None and prev_tick is not None and not data_logger.trading_paused:
             signal = level_tracker.check_signal(prev_tick, tick, current_candle, tick_history)
             if signal is not None:
                 now = time.monotonic()
@@ -155,8 +156,10 @@ async def main() -> None:
     ws_listener.attach(page)
 
     data_logger = DataLogger(
-        tick_buffer, tick_history, candle_aggregator, market_structure, trade_history, deal_buffer
+        tick_buffer, tick_history, candle_aggregator, market_structure, trade_history, deal_buffer, page=page
     )
+    print(f"[CollectData] نظارت پی‌آوت فعال: اگر پی‌آوت واقعیِ یک معامله کمتر از "
+          f"{config.MIN_PAYOUT_PERCENT}٪ باشد، معاملهٔ خودکار این اسکریپت متوقف می‌شود.")
 
     # وقتی استراتژی دکمه را برنامه‌ای کلیک می‌کند، درست قبل از کلیک این مقدار
     # به "level_strategy" تغییر می‌کند تا شنوندهٔ کلیک زیر بداند این معامله را
@@ -182,7 +185,7 @@ async def main() -> None:
         asyncio.create_task(
             tick_consumer_and_strategy_task(
                 tick_queue, tick_buffer, tick_history, candle_aggregator, market_structure,
-                level_tracker, page, click_source_holder,
+                level_tracker, page, click_source_holder, data_logger,
             )
         ),
         asyncio.create_task(hotkey_listener_task(data_logger, stop_event)),
