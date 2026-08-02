@@ -76,6 +76,9 @@ DIRECTION_INTERACTION_COLUMNS = frozenset({
     "candle_color_aligned_with_direction",
     "distance_to_target_atr",
     "distance_to_obstacle_atr",
+    "level_strategy_region_aligned_with_direction",
+    "level_strategy_near_high_signal_aligned_with_direction",
+    "level_strategy_near_low_signal_aligned_with_direction",
 })
 
 # فیچرهای «نوسان ریز» (Micro-Swing): یک خانوادهٔ به‌هم‌مرتبط از فیچرها (نه
@@ -199,6 +202,18 @@ def _add_direction_interaction_features(row: dict) -> None:
     row["trend_aligned_with_direction"] = sign * _num("trend_regime")
     row["streak_aligned_with_direction"] = sign * _num("candle_color_streak")
     row["candle_color_aligned_with_direction"] = sign * (2 * _num("candle_curr_is_bullish", 0.5) - 1)
+
+    # آیا جهت انتخابی با «نظر» استراتژی سطوح (level_strategy.py) در همین
+    # لحظه هم‌جهت است یا مخالف آن؟ مثبت=هم‌جهت، منفی=مخالف، صفر=بدون داده یا
+    # خنثی. هدف این نیست که این سیگنال قانون‌محور را کورکورانه دنبال کنیم،
+    # بلکه این‌که مدل از روی دادهٔ واقعی یاد بگیرد کِی به آن اعتماد کند.
+    row["level_strategy_region_aligned_with_direction"] = sign * _num("level_strategy_region")
+    row["level_strategy_near_high_signal_aligned_with_direction"] = (
+        sign * _num("level_strategy_near_high_implied_direction")
+    )
+    row["level_strategy_near_low_signal_aligned_with_direction"] = (
+        sign * _num("level_strategy_near_low_implied_direction")
+    )
 
     # برای CALL، «هدف» صعود قیمت است (مقاومت مانع، حمایت پشتیبان)؛ برای PUT
     # برعکس. این دو فیچر می‌گویند «در جهتی که رفته‌ام چقدر راه باز است» و
