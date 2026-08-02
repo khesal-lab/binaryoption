@@ -33,7 +33,13 @@ from src.browser_session import (
     launch_browser_and_wait_for_login,
     reconnect_page_if_needed,
 )
-from src.feature_engineering import TickBuffer, TickHistory, CandleAggregator, build_feature_snapshot
+from src.feature_engineering import (
+    TickBuffer,
+    TickHistory,
+    CandleAggregator,
+    build_feature_snapshot,
+    compute_level_strategy_context,
+)
 from src.market_structure import MarketStructureTracker
 from src.state_tracker import TradeHistory
 from src.data_logger import DataLogger
@@ -196,6 +202,16 @@ async def auto_trade_task(
     کرد، خودش روی همان دکمهٔ واقعی BUY/SELL کلیک می‌کند (src/trade_executor).
     برای این‌که ثبت نتیجه با معاملهٔ قبلی قاطی نشود، بعد از هر معاملهٔ خودکار
     حداقل config.AUTO_TRADE_COOLDOWN_SECONDS ثانیه صبر می‌کند.
+
+    نکتهٔ مهم دربارهٔ زمان اجرای پیش‌بینی: تقریباً تمام دادهٔ ترین این مدل از
+    معاملات level_strategy.py آمده - یعنی فقط از لحظاتی که قیمت دقیقاً به یک
+    اکسترمم نزدیک سقف/کف کندل جاری برخورد کرده. اگر این تابع در هر poll_interval
+    (بدون هیچ قیدی) از مدل پیش‌بینی بخواهد، مدل را در موقعیت‌هایی می‌سنجد که
+    اصلاً چیزی شبیهشان ندیده (Train/Serve Skew) - همین می‌تواند دلیل اصلی
+    وین‌ریت پایین‌تر AUTO_TRADE نسبت به خودِ level_strategy در عمل باشد. به
+    همین دلیل، قبل از ساختن اسنپ‌شات کامل، ابتدا با compute_level_strategy_context
+    بررسی می‌شود که آیا قیمت لحظه‌ای همین الان هم نزدیک یکی از همان سطوح
+    کلیدی (نزدیک سقف/کف کندل) هست یا نه؛ اگر نه، این دور نادیده گرفته می‌شود.
     """
     poll_interval = 0.2
     last_trade_monotonic = 0.0
@@ -216,6 +232,24 @@ async def auto_trade_task(
 
         latest = tick_buffer.latest()
         if latest is None or not tick_buffer.is_ready():
+            continue
+
+        current_candle = candle_aggregator.current
+        if current_candle is None or current_candle.range <= 0:
+            continue
+
+        level_context = compute_level_strategy_context(tick_history, current_candle)
+        if level_context is None:
+            continue
+
+        # آیا قیمت لحظه‌ای همین الان نزدیک یکی از همان سطوح کلیدی (نزدیک سقف/کف
+        # کندل جاری) است؟ همان تلورانس خودِ level_strategy.py، تا این تشخیص «شبیه
+        # لحظهٔ سیگنال‌دهی» با چیزی که مدل واقعاً از رویش ترین دیده هم‌خوان باشد.
+        price_position = (latest.price - current_candle.low) / current_candle.range
+        near_high_gap = abs(price_position - level_context["level_strategy_near_high_position"])
+        near_low_gap = abs(price_position - level_context["level_strategy_near_low_position"])
+        if (near_high_gap > config.LEVEL_STRATEGY_MATCH_TOLERANCE_RATIO
+                and near_low_gap > config.LEVEL_STRATEGY_MATCH_TOLERANCE_RATIO):
             continue
 
         snapshot = build_feature_snapshot(tick_buffer, tick_history, candle_aggregator, micro_candle_aggregator)
