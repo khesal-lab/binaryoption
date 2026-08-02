@@ -28,6 +28,20 @@
     sign = +1 برای CALL و -1 برای PUT. یعنی مثبت = هم‌جهت با روند/استریک/رنگ
     کندل جاری، منفی = خلاف آن‌ها.
 
+    نتیجهٔ واقعی (روی ۲۰۵۰ معاملهٔ اول): این فرضیه رد شد - تفاوت وین‌ریت
+    هم‌جهت/خلاف‌جهت در هر سه فیچر بالا فقط حدود ۱ واحد درصد بود (نویز آماری).
+    آزمایش تصادفی‌بودنِ زنجیره‌ها هم نشان داد طول زنجیره‌های واقعی برد/باخت در
+    محدودهٔ طبیعیِ یک فرآیند تصادفی با همان وین‌ریت است.
+
+    فرضیهٔ دومی که به‌جای آن پیدا شد: وین‌ریت بین نمادهای مختلف تفاوت محسوس
+    دارد (مثلاً CADJPY_otc با ۸۴۵ معامله ۶۱.۷٪ در برابر AUDCAD_otc با ۴۸۶
+    معامله ۵۶.۲٪) - که برخلاف فرضیهٔ روند، در دادهٔ واقعی به‌طور مرزی معنادار
+    آماری بود. این اسکریپت حالا (۱) این تفاوت را با یک آزمایش z دو-نسبتی
+    می‌سنجد، و (۲) یک فرضیهٔ مکانیکی مرتبط را هم آزمایش می‌کند: آیا معاملاتی
+    که بلافاصله بعد از تعویض نماد انجام می‌شوند (وقتی SymbolSwitchDetector
+    تازه تمام بافرها را ریست کرده و هنوز دادهٔ کافی جمع نشده) وین‌ریت پایین‌تری
+    دارند یا نه.
+
 این اسکریپت مستقیماً از همان دیتابیس SQLite که main.py/collect_data.py
 می‌سازند (config.SQLITE_DB_PATH) می‌خواند - نیازی به هیچ دادهٔ اضافی نیست و
 هیچ تغییری هم در دیتابیس نمی‌دهد (فقط خواندنی).
@@ -38,6 +52,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 
 import numpy as np
@@ -161,14 +176,84 @@ def _report_streak_randomness(df: pd.DataFrame, n_sims: int = N_RANDOMNESS_SIMUL
           f"{'در محدودهٔ طبیعی نوسان تصادفی است' if win_percentile < 0.95 else 'غیرعادی است؛ احتمالاً یک الگوی واقعی وجود دارد'}")
 
 
-def _report_by_symbol(df: pd.DataFrame) -> None:
+def _two_sided_p_value(z: float) -> float:
+    return 2 * (1 - 0.5 * (1 + math.erf(abs(z) / math.sqrt(2))))
+
+
+def _report_by_symbol(df: pd.DataFrame, min_trades_for_test: int = 30) -> None:
+    """
+    وین‌ریت هر نماد را جداگانه گزارش می‌کند و برای نمادهایی که تعداد معاملهٔ
+    کافی دارند (>= min_trades_for_test)، یک آزمایش آماری (z-test دو-نسبتی در
+    برابر باقیِ داده) هم انجام می‌دهد - تا فرق بین «این نماد واقعاً فرق دارد»
+    و «فقط با تعداد کم شانسی بالا/پایین آمده» روشن شود.
+    """
     print("\n--- وین‌ریت به تفکیک نماد (meta_symbol) ---")
     if "meta_symbol" not in df.columns:
         print("  ستون meta_symbol موجود نیست.")
         return
-    grouped = df.groupby("meta_symbol")["result"].agg(["mean", "count"]).sort_values("count", ascending=False)
-    for symbol, row in grouped.iterrows():
-        print(f"  {symbol}: {int(row['count'])} معامله، وین‌ریت {row['mean']:.1%}")
+
+    total_wins = df["result"].sum()
+    total_n = len(df)
+    counts = df.groupby("meta_symbol").size().sort_values(ascending=False)
+
+    for symbol in counts.index:
+        group = df[df["meta_symbol"] == symbol]
+        n = len(group)
+        wins = group["result"].sum()
+        p = wins / n
+
+        extra = ""
+        if n >= min_trades_for_test:
+            rest_n = total_n - n
+            rest_wins = total_wins - wins
+            if rest_n > 0:
+                rest_p = rest_wins / rest_n
+                pooled_p = total_wins / total_n
+                se = math.sqrt(pooled_p * (1 - pooled_p) * (1 / n + 1 / rest_n))
+                z = (p - rest_p) / se if se > 0 else 0.0
+                pval = _two_sided_p_value(z)
+                flag = " ⚠️ معنادار (p<0.05)" if pval < 0.05 else ""
+                extra = f"  |  در برابر بقیهٔ نمادها: z={z:+.2f}, p={pval:.3f}{flag}"
+
+        vol_txt = ""
+        if "volatility_ratio_short_long" in group.columns and group["volatility_ratio_short_long"].notna().any():
+            vol_txt = f"، میانگین volatility_ratio={group['volatility_ratio_short_long'].mean():.2f}"
+
+        print(f"  {symbol}: {n} معامله، وین‌ریت {p:.1%}{extra}{vol_txt}")
+
+
+def _mark_symbol_run_position(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    برای هر معامله، جایگاهش را در توالیِ معاملات متوالیِ همین نماد محاسبه
+    می‌کند (۱=اولین معاملهٔ این نماد بعد از آخرین تعویض، ۲=دومین و...) - یک
+    تقریب از «چند معامله از آخرین تعویض نماد گذشته»، چون تعویض واقعی روی
+    جریان خام تیک تشخیص داده می‌شود (SymbolSwitchDetector) نه روی توالی
+    معاملات؛ ولی چون معاملات همین توالی زمانی را دنبال می‌کنند، تقریب معقولی
+    است.
+    """
+    if "meta_symbol" not in df.columns:
+        return df
+    run_id = (df["meta_symbol"] != df["meta_symbol"].shift()).cumsum()
+    df["symbol_run_position"] = df.groupby(run_id).cumcount() + 1
+    return df
+
+
+def _report_symbol_run_position(df: pd.DataFrame) -> None:
+    """
+    آیا معاملاتی که بلافاصله بعد از تعویض نماد انجام شده‌اند (وقتی
+    SymbolSwitchDetector تازه تمام بافرها/ساختار بازار را ریست کرده و هنوز
+    دادهٔ کافی جمع نشده) وین‌ریت پایین‌تری از معاملاتی دارند که بعد از مدتی
+    روی همان نماد بوده‌اید؟
+    """
+    if "symbol_run_position" not in df.columns:
+        return
+    print("\n--- وین‌ریت بر اساس جایگاه معامله در توالیِ همان نماد (تقریبی، بعد از هر تعویض نماد) ---")
+    early = df[df["symbol_run_position"] <= 2]
+    later = df[df["symbol_run_position"] > 2]
+    if len(early) > 0:
+        print(f"  دو معاملهٔ اول بعد از هر تعویض نماد: {len(early)} معامله، وین‌ریت {early['result'].mean():.1%}")
+    if len(later) > 0:
+        print(f"  بقیهٔ معاملات (بعد از تثبیت روی همان نماد): {len(later)} معامله، وین‌ریت {later['result'].mean():.1%}")
 
 
 def _report_continuous_split(df: pd.DataFrame, column: str, label: str) -> None:
@@ -219,6 +304,8 @@ def main() -> None:
 
     # --- فرضیه‌های دیگر: نماد و نوسان/عدم‌تقارن سایه ---
     _report_by_symbol(df)
+    df = _mark_symbol_run_position(df)
+    _report_symbol_run_position(df)
     for col, label in CONTINUOUS_CANDIDATE_COLUMNS:
         _report_continuous_split(df, col, label)
 
