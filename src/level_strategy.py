@@ -28,7 +28,13 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from src.browser_session import Tick
-from src.feature_engineering import Candle, TickHistory
+from src.feature_engineering import (
+    Candle,
+    TickHistory,
+    classify_region_vs_open,
+    find_local_extrema,
+    level_strategy_direction_for,
+)
 import config
 
 
@@ -79,17 +85,10 @@ class LevelStrategyTracker:
         if len(ticks_in_candle) < 3:
             return None
 
-        # استخراج همهٔ اکسترمم‌های محلی (نقاط توقف) داخل کندل جاری
-        extrema: list[float] = []
-        prev_dir: Optional[int] = None
-        for i in range(1, len(ticks_in_candle)):
-            diff = ticks_in_candle[i].price - ticks_in_candle[i - 1].price
-            if diff == 0:
-                continue
-            d = 1 if diff > 0 else -1
-            if prev_dir is not None and d != prev_dir:
-                extrema.append(ticks_in_candle[i - 1].price)
-            prev_dir = d
+        # استخراج همهٔ اکسترمم‌های محلی (نقاط توقف) داخل کندل جاری - منطق
+        # مشترک با compute_level_strategy_context در feature_engineering.py
+        # (تا تصمیم واقعی و فیچر ثبت‌شده هیچ‌وقت از هم جدا نشوند).
+        extrema = find_local_extrema(ticks_in_candle)
 
         if not extrema:
             return None
@@ -100,26 +99,7 @@ class LevelStrategyTracker:
         def to_bucket(price: float) -> int:
             return round(price / tolerance) if tolerance > 0 else round(price * 1_000_000)
 
-        # تعیین ناحیه نوسان نسبت به اپن
-        all_above_open = all(p > open_price for p in extrema)
-        all_below_open = all(p < open_price for p in extrema)
-        spans_open = not all_above_open and not all_below_open
-
-        def direction_for(near_high_stall: bool) -> str:
-            """
-            جهت معامله را بر اساس موقعیت نوسان نسبت به اپن برمی‌گرداند.
-            near_high_stall=True  -> سطح نزدیک سقف فعال شده
-            near_high_stall=False -> سطح نزدیک کف فعال شده
-            """
-            if spans_open:
-                # نوسان هر دو طرف اپن: سقف=مقاومت(PUT)، کف=حمایت(CALL)
-                return "PUT" if near_high_stall else "CALL"
-            elif all_above_open:
-                # همه نقاط بالای اپن: ناحیه صعودی -> CALL
-                return "CALL"
-            else:
-                # همه نقاط پایین اپن: ناحیه نزولی -> PUT
-                return "PUT"
+        region = classify_region_vs_open(extrema, open_price)
 
         # نزدیک‌ترین نقطه توقف به سقف و کف کندل
         near_high = min(extrema, key=lambda p: abs(current_candle.high - p))
@@ -133,13 +113,13 @@ class LevelStrategyTracker:
             if (prev_tick.price < near_high <= latest_tick.price or
                     prev_tick.price > near_high >= latest_tick.price):
                 self._traded_levels.append(key_high)
-                return direction_for(near_high_stall=True)
+                return level_strategy_direction_for(region, near_high_stall=True)
 
         # لمس سطح نزدیک کف
         if key_low not in self._traded_levels:
             if (prev_tick.price < near_low <= latest_tick.price or
                     prev_tick.price > near_low >= latest_tick.price):
                 self._traded_levels.append(key_low)
-                return direction_for(near_high_stall=False)
+                return level_strategy_direction_for(region, near_high_stall=False)
 
         return None

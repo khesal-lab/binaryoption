@@ -578,6 +578,90 @@ def normalized_window_shape(
     ]
 
 
+# ---------------------------------------------------------------------------
+# منطق بدون‌حالت (Stateless) استراتژی سطوح (src/level_strategy.py) - این‌جا
+# نگه‌داری می‌شود (نه در خودِ level_strategy.py) تا هم آن ماژول بتواند از این
+# تابع استفاده کند و هم build_feature_snapshot بدون ایجاد Import چرخه‌ای؛
+# تنها منبع حقیقتِ این منطق همین‌جاست - level_strategy.py آن را دوباره
+# پیاده‌سازی نمی‌کند، فقط صدا می‌زند.
+# ---------------------------------------------------------------------------
+def find_local_extrema(ticks: list) -> list[float]:
+    """قیمت نقاط توقف/برگشت محلی (Local Extrema) را از یک دنبالهٔ تیک پیدا می‌کند."""
+    extrema: list[float] = []
+    prev_dir: Optional[int] = None
+    for i in range(1, len(ticks)):
+        diff = ticks[i].price - ticks[i - 1].price
+        if diff == 0:
+            continue
+        d = 1 if diff > 0 else -1
+        if prev_dir is not None and d != prev_dir:
+            extrema.append(ticks[i - 1].price)
+        prev_dir = d
+    return extrema
+
+
+def classify_region_vs_open(extrema: list[float], open_price: float) -> int:
+    """
+    +۱ = تمام اکسترمم‌ها بالای open (ناحیهٔ صعودی، بدون نوسان دوطرفه)
+    -۱ = تمام اکسترمم‌ها پایین open (ناحیهٔ نزولی، بدون نوسان دوطرفه)
+     ۰ = هم بالا هم پایین open (spans_open - نوسان دوطرفهٔ اپن)
+    """
+    if all(p > open_price for p in extrema):
+        return 1
+    if all(p < open_price for p in extrema):
+        return -1
+    return 0
+
+
+def level_strategy_direction_for(region: int, near_high_stall: bool) -> str:
+    """دقیقاً همان منطق direction_for در src/level_strategy.py."""
+    if region == 0:
+        return "PUT" if near_high_stall else "CALL"
+    elif region == 1:
+        return "CALL"
+    else:
+        return "PUT"
+
+
+def compute_level_strategy_context(tick_history: "TickHistory", current_candle: "Candle") -> Optional[dict]:
+    """
+    «نظر» استراتژی سطوح (level_strategy.py) را در همین لحظه، به‌صورت فیچرهای
+    کاملاً نسبی (نه قانون سخت‌کدشده) برمی‌گرداند - مستقل از این‌که خودِ آن
+    استراتژی همین الان معامله را باز کرده یا نه، و مستقل از نماد/سطح قیمت
+    (فقط نسبت‌ها). هدف: در دیتای ترین ثبت شود تا خودِ مدل یاد بگیرد کِی به
+    این سیگنالِ قانون‌محور اعتماد کند و کِی نه (مثلاً وقتی روند بزرگ‌تر با آن
+    مخالف است) - به‌جای این‌که یک آستانهٔ ثابت و دستی در خودِ استراتژی حک شود.
+    اگر دادهٔ کافی نبود (کندل بدون رنج یا کمتر از ۳ تیک)، None برمی‌گرداند.
+    """
+    candle_range = current_candle.range
+    if candle_range <= 0:
+        return None
+
+    ticks_in_candle = [t for t in tick_history.buffer if t.timestamp >= current_candle.start_time]
+    if len(ticks_in_candle) < 3:
+        return None
+
+    extrema = find_local_extrema(ticks_in_candle)
+    if not extrema:
+        return None
+
+    region = classify_region_vs_open(extrema, current_candle.open)
+
+    near_high = min(extrema, key=lambda p: abs(current_candle.high - p))
+    near_low = min(extrema, key=lambda p: abs(p - current_candle.low))
+
+    near_high_direction = 1 if level_strategy_direction_for(region, near_high_stall=True) == "CALL" else -1
+    near_low_direction = 1 if level_strategy_direction_for(region, near_high_stall=False) == "CALL" else -1
+
+    return {
+        "level_strategy_region": region,
+        "level_strategy_near_high_position": (near_high - current_candle.low) / candle_range,
+        "level_strategy_near_low_position": (near_low - current_candle.low) / candle_range,
+        "level_strategy_near_high_implied_direction": near_high_direction,
+        "level_strategy_near_low_implied_direction": near_low_direction,
+    }
+
+
 class CandleAggregator:
     """
     از روی جریان تیک‌های ورودی، کندل‌های OHLC با تایم‌فریم مشخص (پیش‌فرض ۱ دقیقه)
@@ -733,5 +817,20 @@ def build_feature_snapshot(
                 micro_candle_aggregator.current,
             )
         )
+
+    # «نظر» استراتژی سطوح (level_strategy.py) در همین لحظه - نه به‌عنوان یک
+    # قانون سخت‌کدشده، بلکه به‌صورت فیچرهای نسبی تا خودِ مدل یاد بگیرد کِی به
+    # این سیگنال اعتماد کند (مثلاً وقتی با روند بزرگ‌تر هم‌جهت است) و کِی نه.
+    level_strategy_context = (
+        compute_level_strategy_context(tick_history, current_candle) if current_candle else None
+    )
+    if level_strategy_context is not None:
+        snapshot.update(level_strategy_context)
+    else:
+        snapshot["level_strategy_region"] = None
+        snapshot["level_strategy_near_high_position"] = None
+        snapshot["level_strategy_near_low_position"] = None
+        snapshot["level_strategy_near_high_implied_direction"] = None
+        snapshot["level_strategy_near_low_implied_direction"] = None
 
     return snapshot

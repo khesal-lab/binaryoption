@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from src.browser_session import Tick
-from src.feature_engineering import Candle, TickHistory
+from src.feature_engineering import Candle, TickHistory, classify_region_vs_open, find_local_extrema
 import config
 
 _OPPOSITE = {"CALL": "PUT", "PUT": "CALL"}
@@ -122,17 +122,10 @@ class OptimizedLevelStrategyTracker:
         if len(ticks_in_candle) < 3:
             return None
 
-        # استخراج همهٔ اکسترمم‌های محلی (نقاط توقف) داخل کندل جاری
-        extrema: list[float] = []
-        prev_dir: Optional[int] = None
-        for i in range(1, len(ticks_in_candle)):
-            diff = ticks_in_candle[i].price - ticks_in_candle[i - 1].price
-            if diff == 0:
-                continue
-            d = 1 if diff > 0 else -1
-            if prev_dir is not None and d != prev_dir:
-                extrema.append(ticks_in_candle[i - 1].price)
-            prev_dir = d
+        # استخراج همهٔ اکسترمم‌های محلی (نقاط توقف) داخل کندل جاری - منطق
+        # مشترک با compute_level_strategy_context در feature_engineering.py
+        # (تا تصمیم واقعی و فیچر ثبت‌شده هیچ‌وقت از هم جدا نشوند).
+        extrema = find_local_extrema(ticks_in_candle)
 
         if not extrema:
             return None
@@ -143,10 +136,8 @@ class OptimizedLevelStrategyTracker:
         def to_bucket(price: float) -> int:
             return round(price / tolerance) if tolerance > 0 else round(price * 1_000_000)
 
-        # تعیین ناحیه نوسان نسبت به اپن
-        all_above_open = all(p > open_price for p in extrema)
-        all_below_open = all(p < open_price for p in extrema)
-        spans_open = not all_above_open and not all_below_open
+        region = classify_region_vs_open(extrema, open_price)
+        spans_open = region == 0
 
         def direction_for(near_high_stall: bool) -> str:
             """
@@ -159,7 +150,7 @@ class OptimizedLevelStrategyTracker:
                 if self._reversed_in_current_candle:
                     direction = _OPPOSITE[direction]
                 return direction
-            elif all_above_open:
+            elif region == 1:
                 return "CALL"
             else:
                 return "PUT"
