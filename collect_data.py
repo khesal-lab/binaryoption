@@ -108,7 +108,7 @@ async def tick_consumer_and_strategy_task(
             level_tracker.on_new_candle(closed_candle)
 
         current_candle = candle_aggregator.current
-        if current_candle is not None and prev_tick is not None and not data_logger.trading_paused:
+        if current_candle is not None and prev_tick is not None and not data_logger.is_bot_trading_blocked():
             signal = level_tracker.check_signal(prev_tick, tick, current_candle, tick_history)
             if signal is not None:
                 now = time.monotonic()

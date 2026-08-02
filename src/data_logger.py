@@ -142,6 +142,8 @@ class DataLogger:
         sqlite_path=config.SQLITE_DB_PATH,
         expiry_seconds: float = config.TRADE_EXPIRY_SECONDS,
         deal_result_wait_seconds: float = config.DEAL_RESULT_WAIT_SECONDS,
+        consecutive_losses_for_cooldown: int = config.CONSECUTIVE_LOSSES_FOR_COOLDOWN,
+        consecutive_loss_cooldown_seconds: float = config.CONSECUTIVE_LOSS_COOLDOWN_SECONDS,
     ):
         self.tick_buffer = tick_buffer
         self.tick_history = tick_history
@@ -160,6 +162,8 @@ class DataLogger:
         self.sqlite_path = sqlite_path
         self.expiry_seconds = expiry_seconds
         self.deal_result_wait_seconds = deal_result_wait_seconds
+        self.consecutive_losses_for_cooldown = consecutive_losses_for_cooldown
+        self.consecutive_loss_cooldown_seconds = consecutive_loss_cooldown_seconds
         # وین‌ریت جداگانه فقط برای معاملاتی که خودِ ربات (نه کاربر) باز کرده،
         # تا بشود عملکرد لحظه‌ای مدل را مستقل از معاملات دستی دنبال کرد.
         self.bot_trade_history = TradeHistory()
@@ -176,6 +180,13 @@ class DataLogger:
         # صفحه (که DOM و بنر تزریق‌شده را از بین می‌برد) بتوانیم همان بنر را
         # با همان پیام دوباره بسازیم.
         self._last_low_payout_percent: Optional[float] = None
+        # چند معاملهٔ برنامه‌ای (خودکار، نه دستی) پشت‌سرهم باخت بوده‌اند؟ فقط
+        # نتیجهٔ معاملات بات (source != "manual") در این شمارنده اثر می‌گذارد.
+        self._consecutive_loss_streak = 0
+        # اگر با توقف کوتاه‌مدت بعد از باخت متوالی مواجه شدیم، معاملهٔ خودکار
+        # تا این لحظه (time.monotonic()) متوقف می‌ماند - جدا از trading_paused
+        # که توقف پی‌آوت پایین است و نیاز به resume دستی دارد.
+        self._loss_cooldown_until_monotonic: float = 0.0
 
         self._init_sqlite()
 
@@ -273,6 +284,17 @@ class DataLogger:
         self.trade_history.add_result(result)
         if pending.source != "manual":
             self.bot_trade_history.add_result(result)
+            if result == 1:
+                self._consecutive_loss_streak = 0
+            else:
+                self._consecutive_loss_streak += 1
+                if self._consecutive_loss_streak >= self.consecutive_losses_for_cooldown:
+                    self._loss_cooldown_until_monotonic = (
+                        time.monotonic() + self.consecutive_loss_cooldown_seconds
+                    )
+                    print(f"[DataLogger] ⏸ {self._consecutive_loss_streak} باخت متوالی در معاملات "
+                          f"برنامه‌ای - معاملهٔ خودکار برای {self.consecutive_loss_cooldown_seconds:.0f} "
+                          f"ثانیه متوقف می‌شود (معاملهٔ دستی شما آزاد است).")
         if self.on_result_callback is not None:
             self.on_result_callback(pending.source, result)
 
@@ -407,6 +429,17 @@ class DataLogger:
         asyncio.create_task(self._hide_low_payout_banner())
         asyncio.create_task(self._sync_toggle_button())
         return True
+
+    def is_bot_trading_blocked(self) -> bool:
+        """
+        True اگر معاملهٔ برنامه‌ای (خودکار) فعلاً باید متوقف بماند - یا به‌خاطر
+        توقف پی‌آوت پایین (trading_paused، که نیاز به دستور resume دستی دارد)
+        یا به‌خاطر توقف کوتاه‌مدت بعد از باخت‌های متوالی (که خودش بعد از
+        consecutive_loss_cooldown_seconds ثانیه تمام می‌شود). فراخوان‌های
+        main.py/collect_data.py قبل از هر کلیک برنامه‌ای این تابع را چک
+        می‌کنند؛ معاملهٔ دستی خودِ شما هرگز توسط این تابع مسدود نمی‌شود.
+        """
+        return self.trading_paused or time.monotonic() < self._loss_cooldown_until_monotonic
 
     # -- دکمهٔ توقف/ازسرگیری روی خودِ صفحهٔ مرورگر -------------------------------
     async def install_page_controls(self) -> None:
