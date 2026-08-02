@@ -146,6 +146,18 @@ def _flatten_chart_shape_long(row: dict) -> None:
     )
 
 
+def _flatten_micro_chart_shape(row: dict) -> None:
+    """
+    شکل نرمال‌شدهٔ پنجرهٔ کندل‌های ریزِ چندثانیه‌ای (پیش‌فرض ۵ ثانیه) - همان روش
+    Flatten، پیشوند جدا (micro_chart_shape_*). اگر این ستون در ردیف موجود
+    نباشد (مثلاً دادهٔ قدیمی‌تر از این فیچر)، _flatten_chart_shape_generic
+    خودش با مقادیر خنثی Pad می‌کند - پس رکوردهای قدیمی هم بدون خطا خوانده می‌شوند.
+    """
+    _flatten_chart_shape_generic(
+        row, "micro_chart_shape_json", "micro_chart_shape", config.MICRO_CHART_WINDOW_CANDLES
+    )
+
+
 def _flatten_tick_velocities(row: dict) -> None:
     raw = row.pop("recent_tick_velocities_json", None)
     length = max(config.TICK_BUFFER_SIZE - 1, 0)
@@ -212,6 +224,7 @@ def flatten_snapshot_for_model(snapshot: dict) -> dict[str, float]:
     _add_direction_interaction_features(row)
     _flatten_chart_shape(row)
     _flatten_chart_shape_long(row)
+    _flatten_micro_chart_shape(row)
     _flatten_tick_velocities(row)
 
     for col in _EXCLUDED_COLUMNS:

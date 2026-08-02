@@ -537,6 +537,47 @@ def compare_recent_candles(history: "deque[Candle]", n: int = 3) -> dict:
     return features
 
 
+def normalized_window_shape(
+    candles: "deque[Candle]", window_size: int, current_candle: Optional[Candle] = None
+) -> list[dict]:
+    """
+    یک «پنجرهٔ دیداری» ثابت از کندل‌های تکمیل‌شده (به‌علاوهٔ کندلِ در حال
+    شکل‌گیری فعلی، اگر داده شود، به‌عنوان لبهٔ راست) را می‌گیرد و محور قیمت را
+    خودش با همان پنجره Auto-Scale می‌کند (۰ تا ۱ نسبت به های/لوی همان پنجره) -
+    هیچ مرجع بیرونی (قیمت خام، ATR، زمان) استفاده نمی‌شود، پس مستقل از نماد/
+    سطح قیمت و تایم‌فریم کندل است؛ همان منطقی که MarketStructureTracker برای
+    «شکل چارت» در تایم‌فریم اصلی استفاده می‌کند، این‌جا به‌صورت تابع مستقل
+    است تا برای هر تایم‌فریم دیگری (مثلاً کندل‌های ریزتر چندثانیه‌ای) هم قابل
+    استفاده باشد. ترتیب خروجی از قدیم به جدید است.
+    """
+    closed = list(candles)
+    window = closed[-(window_size - 1):] if current_candle else closed[-window_size:]
+    if current_candle:
+        window = window + [current_candle]
+    if not window:
+        return []
+
+    window_high = max(c.high for c in window)
+    window_low = min(c.low for c in window)
+    span = window_high - window_low
+    if span <= 0:
+        return []
+
+    def norm(v: float) -> float:
+        return (v - window_low) / span
+
+    return [
+        {
+            "o": norm(c.open),
+            "h": norm(c.high),
+            "l": norm(c.low),
+            "c": norm(c.close),
+            "bullish": int(c.is_bullish),
+        }
+        for c in window
+    ]
+
+
 class CandleAggregator:
     """
     از روی جریان تیک‌های ورودی، کندل‌های OHLC با تایم‌فریم مشخص (پیش‌فرض ۱ دقیقه)
@@ -603,6 +644,7 @@ def build_feature_snapshot(
     tick_buffer: TickBuffer,
     tick_history: TickHistory,
     candle_aggregator: CandleAggregator,
+    micro_candle_aggregator: Optional[CandleAggregator] = None,
 ) -> dict:
     """
     تمام ویژگی‌های نسبیِ سطح تیک/کندل را در یک دیکشنری جمع می‌کند. ویژگی‌های
@@ -678,5 +720,18 @@ def build_feature_snapshot(
         snapshot.update(candle_aggregator.get_previous_candle().as_dict("candle_prev1"))
 
     snapshot.update(compare_recent_candles(candle_aggregator.history, n=3))
+
+    # شکل نرمال‌شدهٔ چند کندل ریزِ چندثانیه‌ای اخیر (مستقل از کندل یک‌دقیقه‌ای
+    # بالا) - تا مدل تصویری از رفتار قیمت درست در همان چند ثانیهٔ منتهی به
+    # لحظهٔ ورود به معامله هم داشته باشد، دقیقاً مثل chart_shape_json ولی در
+    # یک تایم‌فریم ریزتر.
+    if micro_candle_aggregator is not None:
+        snapshot["micro_chart_shape_json"] = json.dumps(
+            normalized_window_shape(
+                micro_candle_aggregator.history,
+                config.MICRO_CHART_WINDOW_CANDLES,
+                micro_candle_aggregator.current,
+            )
+        )
 
     return snapshot

@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 
 import config
-from src.feature_engineering import Candle
+from src.feature_engineering import Candle, normalized_window_shape
 
 SwingKind = Literal["high", "low"]
 
@@ -196,37 +196,12 @@ class MarketStructureTracker:
 
     def _normalized_window_shape(self, window_size: int, current_candle: Optional[Candle]) -> list[dict]:
         """
-        منطق مشترک شکل نرمال‌شدهٔ چارت برای یک پنجرهٔ دلخواه (کوچک یا بزرگ):
-        محور قیمت خودش را با همان پنجره Auto-Scale می‌کند (۰ تا ۱ نسبت به های/
-        لوی همان پنجره) - هیچ مرجع بیرونی (قیمت خام، ATR، زمان) استفاده
-        نمی‌شود، پس مستقل از نماد/سطح قیمت و برای هر چارتی قابل تطبیق است.
+        منطق مشترک شکل نرمال‌شدهٔ چارت برای یک پنجرهٔ دلخواه (کوچک یا بزرگ) -
+        پیاده‌سازی واقعی در feature_engineering.normalized_window_shape است
+        (تا برای تایم‌فریم‌های دیگر، مثل کندل‌های ریزتر چندثانیه‌ای، هم بدون
+        نیاز به یک MarketStructureTracker کامل قابل استفاده باشد).
         """
-        closed = list(self.candles)
-        window = closed[-(window_size - 1):] if current_candle else closed[-window_size:]
-        if current_candle:
-            window = window + [current_candle]
-        if not window:
-            return []
-
-        window_high = max(c.high for c in window)
-        window_low = min(c.low for c in window)
-        span = window_high - window_low
-        if span <= 0:
-            return []
-
-        def norm(v: float) -> float:
-            return (v - window_low) / span
-
-        return [
-            {
-                "o": norm(c.open),
-                "h": norm(c.high),
-                "l": norm(c.low),
-                "c": norm(c.close),
-                "bullish": int(c.is_bullish),
-            }
-            for c in window
-        ]
+        return normalized_window_shape(self.candles, window_size, current_candle)
 
     def get_normalized_chart_shape(self, current_candle: Optional[Candle] = None) -> list[dict]:
         """
