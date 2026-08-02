@@ -159,8 +159,7 @@ class DataLogger:
         sqlite_path=config.SQLITE_DB_PATH,
         expiry_seconds: float = config.TRADE_EXPIRY_SECONDS,
         deal_result_wait_seconds: float = config.DEAL_RESULT_WAIT_SECONDS,
-        consecutive_losses_for_cooldown: int = config.CONSECUTIVE_LOSSES_FOR_COOLDOWN,
-        consecutive_loss_cooldown_seconds: float = config.CONSECUTIVE_LOSS_COOLDOWN_SECONDS,
+        consecutive_loss_cooldown_tiers: Optional[list[tuple[int, float]]] = None,
         micro_candle_aggregator: Optional[CandleAggregator] = None,
     ):
         self.tick_buffer = tick_buffer
@@ -184,8 +183,13 @@ class DataLogger:
         self.sqlite_path = sqlite_path
         self.expiry_seconds = expiry_seconds
         self.deal_result_wait_seconds = deal_result_wait_seconds
-        self.consecutive_losses_for_cooldown = consecutive_losses_for_cooldown
-        self.consecutive_loss_cooldown_seconds = consecutive_loss_cooldown_seconds
+        # اگر مقدار صریحی داده نشده باشد (حالت عادی - main.py/collect_data.py این
+        # پارامتر را پاس نمی‌دهند)، سطوح همیشه مستقیم از خودِ ماژول config خوانده
+        # می‌شوند (نه یک‌بار اسنپ‌شات‌شده این‌جا) - تا اگر config.py در حین اجرا تغییر
+        # کند و config_reloader.py دوباره‌اش را reload کند، همین‌جا هم بدون نیاز به
+        # ری‌استارت اسکریپت بلافاصله اثر بگذارد. تست‌ها می‌توانند برای مقدار ثابت/سریع،
+        # این پارامتر را صریح پاس بدهند.
+        self._consecutive_loss_cooldown_tiers_override = consecutive_loss_cooldown_tiers
         # وین‌ریت جداگانه فقط برای معاملاتی که خودِ ربات (نه کاربر) باز کرده،
         # تا بشود عملکرد لحظه‌ای مدل را مستقل از معاملات دستی دنبال کرد.
         self.bot_trade_history = TradeHistory()
@@ -211,6 +215,27 @@ class DataLogger:
         self._loss_cooldown_until_monotonic: float = 0.0
 
         self._init_sqlite()
+
+    @property
+    def consecutive_loss_cooldown_tiers(self) -> list[tuple[int, float]]:
+        if self._consecutive_loss_cooldown_tiers_override is not None:
+            return self._consecutive_loss_cooldown_tiers_override
+        return config.CONSECUTIVE_LOSS_COOLDOWN_TIERS
+
+    def _cooldown_seconds_for_streak(self, streak: int) -> Optional[float]:
+        """
+        بین همهٔ سطوحی که آستانه‌شان (تعداد باخت متوالی) به streak رسیده،
+        بیشترین مدت توقف را برمی‌گرداند - یعنی اگر زنجیرهٔ باخت از چند سطح
+        عبور کرده باشد، سخت‌گیرانه‌ترین سطح اعمال می‌شود (نه لزوماً سطحی که
+        بالاترین آستانه را دارد، بلکه سطحی که مدت توقفش بیشتر است). اگر هیچ
+        سطحی هنوز نرسیده باشد، None برمی‌گرداند.
+        """
+        applicable = [
+            cooldown_seconds
+            for threshold, cooldown_seconds in self.consecutive_loss_cooldown_tiers
+            if streak >= threshold
+        ]
+        return max(applicable) if applicable else None
 
     # -- راه‌اندازی اولیهٔ SQLite ---------------------------------------------
     def _init_sqlite(self) -> None:
@@ -312,14 +337,13 @@ class DataLogger:
                 self._consecutive_loss_streak = 0
             else:
                 self._consecutive_loss_streak += 1
-                if self._consecutive_loss_streak >= self.consecutive_losses_for_cooldown:
-                    self._loss_cooldown_until_monotonic = (
-                        time.monotonic() + self.consecutive_loss_cooldown_seconds
-                    )
+                cooldown_seconds = self._cooldown_seconds_for_streak(self._consecutive_loss_streak)
+                if cooldown_seconds is not None:
+                    self._loss_cooldown_until_monotonic = time.monotonic() + cooldown_seconds
                     print(f"[DataLogger] ⏸ {self._consecutive_loss_streak} باخت متوالی در معاملات "
-                          f"برنامه‌ای - معاملهٔ خودکار برای {self.consecutive_loss_cooldown_seconds:.0f} "
+                          f"برنامه‌ای - معاملهٔ خودکار برای {cooldown_seconds:.0f} "
                           f"ثانیه متوقف می‌شود (معاملهٔ دستی شما آزاد است).")
-                    asyncio.create_task(self._show_loss_cooldown_banner())
+                    asyncio.create_task(self._show_loss_cooldown_banner(cooldown_seconds))
         if self.on_result_callback is not None:
             self.on_result_callback(pending.source, result)
 
@@ -440,19 +464,20 @@ class DataLogger:
         except Exception as exc:  # noqa: BLE001 - نباید ادامهٔ برنامه را مختل کند
             print(f"[DataLogger] هشدار: مخفی‌کردن بنر ناموفق بود: {exc}")
 
-    async def _show_loss_cooldown_banner(self) -> None:
+    async def _show_loss_cooldown_banner(self, cooldown_seconds: float) -> None:
         """
         یک بنر نارنجی موقت بالای صفحه نشان می‌دهد که به‌خاطر باخت‌های متوالی
         معاملهٔ خودکار موقتاً متوقف شده. برخلاف بنر پی‌آوت پایین، نیازی به
         دستور resume نیست - این تابع خودش صبر می‌کند تا زمان توقف
         (self._loss_cooldown_until_monotonic) واقعاً تمام شود و بعد بنر را
         خودکار مخفی می‌کند. اگر در همین حین توقف دوباره تمدید شده باشد (باخت
-        متوالی دیگری رخ داده)، حلقه دوباره صبر می‌کند تا زمان جدید هم بگذرد.
+        متوالی دیگری رخ داده، شاید حتی با مدت توقفِ سطح بعدی)، حلقه دوباره صبر
+        می‌کند تا زمان جدید هم بگذرد.
         """
         if self.page is not None:
             message = (
                 f"⏸ {self._consecutive_loss_streak} باخت متوالی در معاملات برنامه‌ای - معاملهٔ "
-                f"خودکار برای {self.consecutive_loss_cooldown_seconds:.0f} ثانیه متوقف شد و خودش "
+                f"خودکار برای {cooldown_seconds:.0f} ثانیه متوقف شد و خودش "
                 f"دوباره فعال می‌شود. معاملهٔ دستی شما آزاد است."
             )
             js = """
@@ -517,8 +542,8 @@ class DataLogger:
         """
         True اگر معاملهٔ برنامه‌ای (خودکار) فعلاً باید متوقف بماند - یا به‌خاطر
         توقف پی‌آوت پایین (trading_paused، که نیاز به دستور resume دستی دارد)
-        یا به‌خاطر توقف کوتاه‌مدت بعد از باخت‌های متوالی (که خودش بعد از
-        consecutive_loss_cooldown_seconds ثانیه تمام می‌شود). فراخوان‌های
+        یا به‌خاطر توقف کوتاه‌مدت بعد از باخت‌های متوالی (که خودش طبق سطح
+        رسیده‌شده در consecutive_loss_cooldown_tiers تمام می‌شود). فراخوان‌های
         main.py/collect_data.py قبل از هر کلیک برنامه‌ای این تابع را چک
         می‌کنند؛ معاملهٔ دستی خودِ شما هرگز توسط این تابع مسدود نمی‌شود.
         """

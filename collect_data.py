@@ -48,6 +48,7 @@ from src.trade_executor import click_trade_button
 from src.level_strategy import LevelStrategyTracker
 from src.level_strategy_optimized import OptimizedLevelStrategyTracker
 from src.symbol_tracker import SymbolSwitchDetector
+from src.config_reloader import config_hot_reload_task
 
 
 async def tick_consumer_and_strategy_task(
@@ -222,6 +223,12 @@ async def main() -> None:
     print(f"[CollectData] نظارت پی‌آوت فعال: اگر پی‌آوت واقعیِ یک معامله کمتر از "
           f"{config.MIN_PAYOUT_PERCENT}٪ باشد، معاملهٔ خودکار این اسکریپت متوقف می‌شود.")
     print("[CollectData] یک دکمهٔ «توقف/ازسرگیری معاملهٔ خودکار» هم پایین-چپ صفحهٔ مرورگر اضافه شد.")
+    tiers_text = " | ".join(
+        f"{n} باخت پیاپی -> {s:.0f} ثانیه" for n, s in config.CONSECUTIVE_LOSS_COOLDOWN_TIERS
+    )
+    print(f"[CollectData] توقف بعد از باخت متوالی (چند سطحی): {tiers_text}")
+    print("[CollectData] بارگذاری زندهٔ config.py فعال است - تغییر config.py در حین اجرا (بدون نیاز به "
+          "ری‌استارت) روی مقادیری مثل توقف باخت متوالی/پی‌آوت اعمال می‌شود.")
 
     # وقتی استراتژی دکمه را برنامه‌ای کلیک می‌کند، درست قبل از کلیک این مقدار
     # به "level_strategy" تغییر می‌کند تا شنوندهٔ کلیک زیر بداند این معامله را
@@ -253,6 +260,7 @@ async def main() -> None:
         ),
         asyncio.create_task(hotkey_listener_task(data_logger, stop_event)),
         asyncio.create_task(connection_watchdog_task(ws_listener, page, stop_event)),
+        asyncio.create_task(config_hot_reload_task(stop_event)),
     ]
 
     try:
