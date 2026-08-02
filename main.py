@@ -297,8 +297,10 @@ async def main() -> None:
     print(f"[Main] نظارت پی‌آوت فعال: اگر پی‌آوت واقعیِ یک معامله کمتر از "
           f"{config.MIN_PAYOUT_PERCENT}٪ باشد، معاملهٔ خودکار (AUTO_TRADE) متوقف می‌شود.")
     print("[Main] یک دکمهٔ «توقف/ازسرگیری معاملهٔ خودکار» هم پایین-چپ صفحهٔ مرورگر اضافه شد.")
-    print(f"[Main] توقف بعد از باخت متوالی: {config.CONSECUTIVE_LOSSES_FOR_COOLDOWN} باخت پیاپی -> "
-          f"{config.CONSECUTIVE_LOSS_COOLDOWN_SECONDS:.0f} ثانیه توقف.")
+    tiers_text = " | ".join(
+        f"{n} باخت پیاپی -> {s:.0f} ثانیه" for n, s in config.CONSECUTIVE_LOSS_COOLDOWN_TIERS
+    )
+    print(f"[Main] توقف بعد از باخت متوالی (چند سطحی): {tiers_text}")
     print("[Main] بارگذاری زندهٔ config.py فعال است - تغییر config.py در حین اجرا (بدون نیاز به "
           "ری‌استارت) روی مقادیری مثل توقف باخت متوالی/پی‌آوت/آستانهٔ اطمینان اعمال می‌شود.")
 
