@@ -144,10 +144,15 @@ class DataLogger:
         deal_result_wait_seconds: float = config.DEAL_RESULT_WAIT_SECONDS,
         consecutive_losses_for_cooldown: int = config.CONSECUTIVE_LOSSES_FOR_COOLDOWN,
         consecutive_loss_cooldown_seconds: float = config.CONSECUTIVE_LOSS_COOLDOWN_SECONDS,
+        micro_candle_aggregator: Optional[CandleAggregator] = None,
     ):
         self.tick_buffer = tick_buffer
         self.tick_history = tick_history
         self.candle_aggregator = candle_aggregator
+        # کندل‌ساز ریزِ چندثانیه‌ای اختیاری (پیش‌فرض ۵ ثانیه) - فقط برای اضافه‌کردن
+        # «شکل چارت» ریز به اسنپ‌شات هر معامله (micro_chart_shape_json)؛ اگر داده
+        # نشود، این ویژگی صرفاً از اسنپ‌شات حذف می‌ماند.
+        self.micro_candle_aggregator = micro_candle_aggregator
         self.market_structure = market_structure
         self.trade_history = trade_history
         self.deal_buffer = deal_buffer
@@ -231,7 +236,9 @@ class DataLogger:
             print("[DataLogger] هنوز هیچ تیکی دریافت نشده؛ معامله ثبت نشد.")
             return
 
-        snapshot = build_feature_snapshot(self.tick_buffer, self.tick_history, self.candle_aggregator)
+        snapshot = build_feature_snapshot(
+            self.tick_buffer, self.tick_history, self.candle_aggregator, self.micro_candle_aggregator
+        )
         snapshot.update(
             self.market_structure.get_features(latest.price, latest.timestamp, self.candle_aggregator.current)
         )
@@ -295,6 +302,7 @@ class DataLogger:
                     print(f"[DataLogger] ⏸ {self._consecutive_loss_streak} باخت متوالی در معاملات "
                           f"برنامه‌ای - معاملهٔ خودکار برای {self.consecutive_loss_cooldown_seconds:.0f} "
                           f"ثانیه متوقف می‌شود (معاملهٔ دستی شما آزاد است).")
+                    asyncio.create_task(self._show_loss_cooldown_banner())
         if self.on_result_callback is not None:
             self.on_result_callback(pending.source, result)
 
@@ -414,6 +422,64 @@ class DataLogger:
             await self.page.evaluate(js)
         except Exception as exc:  # noqa: BLE001 - نباید ادامهٔ برنامه را مختل کند
             print(f"[DataLogger] هشدار: مخفی‌کردن بنر ناموفق بود: {exc}")
+
+    async def _show_loss_cooldown_banner(self) -> None:
+        """
+        یک بنر نارنجی موقت بالای صفحه نشان می‌دهد که به‌خاطر باخت‌های متوالی
+        معاملهٔ خودکار موقتاً متوقف شده. برخلاف بنر پی‌آوت پایین، نیازی به
+        دستور resume نیست - این تابع خودش صبر می‌کند تا زمان توقف
+        (self._loss_cooldown_until_monotonic) واقعاً تمام شود و بعد بنر را
+        خودکار مخفی می‌کند. اگر در همین حین توقف دوباره تمدید شده باشد (باخت
+        متوالی دیگری رخ داده)، حلقه دوباره صبر می‌کند تا زمان جدید هم بگذرد.
+        """
+        if self.page is not None:
+            message = (
+                f"⏸ {self._consecutive_loss_streak} باخت متوالی در معاملات برنامه‌ای - معاملهٔ "
+                f"خودکار برای {self.consecutive_loss_cooldown_seconds:.0f} ثانیه متوقف شد و خودش "
+                f"دوباره فعال می‌شود. معاملهٔ دستی شما آزاد است."
+            )
+            js = """
+            (text) => {
+                let el = document.getElementById('__loss_cooldown_banner__');
+                if (!el) {
+                    el = document.createElement('div');
+                    el.id = '__loss_cooldown_banner__';
+                    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;' +
+                        'background:#d68910;color:#fff;font:bold 16px/1.4 sans-serif;' +
+                        'text-align:center;padding:10px 16px;direction:rtl;';
+
+                    const textSpan = document.createElement('span');
+                    textSpan.id = '__loss_cooldown_banner_text__';
+                    el.appendChild(textSpan);
+
+                    document.body.appendChild(el);
+                }
+                el.querySelector('#__loss_cooldown_banner_text__').textContent = text;
+                el.style.display = 'block';
+            }
+            """
+            try:
+                await self.page.evaluate(js, message)
+            except Exception as exc:  # noqa: BLE001 - نمایش بنر نباید ثبت دیتاست را مختل کند
+                print(f"[DataLogger] هشدار: نمایش بنر توقف کوتاه‌مدت ناموفق بود: {exc}")
+
+        while True:
+            remaining = self._loss_cooldown_until_monotonic - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(remaining)
+
+        await self._hide_loss_cooldown_banner()
+
+    async def _hide_loss_cooldown_banner(self) -> None:
+        """بنر توقف کوتاه‌مدت را مخفی می‌کند (بعد از اتمام خودکار زمان توقف)."""
+        if self.page is None:
+            return
+        js = "() => { const el = document.getElementById('__loss_cooldown_banner__'); if (el) el.style.display = 'none'; }"
+        try:
+            await self.page.evaluate(js)
+        except Exception as exc:  # noqa: BLE001 - نباید ادامهٔ برنامه را مختل کند
+            print(f"[DataLogger] هشدار: مخفی‌کردن بنر توقف کوتاه‌مدت ناموفق بود: {exc}")
 
     def resume_trading(self) -> bool:
         """

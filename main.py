@@ -49,11 +49,15 @@ async def tick_consumer_task(
     tick_history: TickHistory,
     candle_aggregator: CandleAggregator,
     market_structure: MarketStructureTracker,
+    micro_candle_aggregator: CandleAggregator,
 ) -> None:
     """
     Task 1: پیوسته از صف تیک‌های خام می‌خواند، بافرها و کندل‌ساز را به‌روز می‌کند.
     هر بار که یک کندل یک‌دقیقه‌ای بسته شود، همان کندل به MarketStructureTracker
-    داده می‌شود تا سوئینگ/لگ/حمایت‌مقاومت/روند را به‌روزرسانی کند.
+    داده می‌شود تا سوئینگ/لگ/حمایت‌مقاومت/روند را به‌روزرسانی کند. کندل‌ساز
+    ریزِ چندثانیه‌ای (micro_candle_aggregator) هم موازی و از همان جریان تیک
+    به‌روز می‌شود - فقط برای «شکل چارت» ریز در build_feature_snapshot استفاده
+    می‌شود، نیازی به ساختار بازار جداگانه ندارد.
     این حلقه باید همیشه سریع باشد تا هیچ تأخیری روی داده‌های real-time نیفتد.
 
     اگر کاربر نماد معاملاتی را دستی در پلتفرم عوض کند، تیک‌های جدید symbol
@@ -73,6 +77,7 @@ async def tick_consumer_task(
             tick_history.reset()
             candle_aggregator.reset()
             market_structure.reset()
+            micro_candle_aggregator.reset()
 
         if tick.symbol != symbol_detector.current_symbol:
             # این تیک مربوط به نماد دیگری است که هم‌زمان (مثلاً به‌خاطر یک هشدار قیمتی
@@ -87,6 +92,7 @@ async def tick_consumer_task(
         closed_candle = candle_aggregator.add_tick(tick)
         if closed_candle is not None:
             market_structure.ingest_closed_candle(closed_candle)
+        micro_candle_aggregator.add_tick(tick)
 
 
 async def hotkey_listener_task(data_logger: DataLogger, stop_event: asyncio.Event) -> None:
@@ -180,6 +186,7 @@ async def auto_trade_task(
     click_source_holder: dict,
     data_logger: DataLogger,
     stop_event: asyncio.Event,
+    micro_candle_aggregator: CandleAggregator,
 ) -> None:
     """
     Task اختیاری: فقط وقتی config.AUTO_TRADE_ENABLED فعال و فایل مدل موجود
@@ -211,7 +218,7 @@ async def auto_trade_task(
         if latest is None or not tick_buffer.is_ready():
             continue
 
-        snapshot = build_feature_snapshot(tick_buffer, tick_history, candle_aggregator)
+        snapshot = build_feature_snapshot(tick_buffer, tick_history, candle_aggregator, micro_candle_aggregator)
         snapshot.update(
             market_structure.get_features(latest.price, latest.timestamp, candle_aggregator.current)
         )
@@ -236,6 +243,7 @@ async def main() -> None:
     tick_buffer = TickBuffer()
     tick_history = TickHistory()
     candle_aggregator = CandleAggregator()
+    micro_candle_aggregator = CandleAggregator(timeframe_seconds=config.MICRO_CANDLE_TIMEFRAME_SECONDS)
     market_structure = MarketStructureTracker()
     trade_history = TradeHistory()
 
@@ -247,7 +255,8 @@ async def main() -> None:
     ws_listener.attach(page)
 
     data_logger = DataLogger(
-        tick_buffer, tick_history, candle_aggregator, market_structure, trade_history, deal_buffer, page=page
+        tick_buffer, tick_history, candle_aggregator, market_structure, trade_history, deal_buffer, page=page,
+        micro_candle_aggregator=micro_candle_aggregator,
     )
     await data_logger.install_page_controls()
     print(f"[Main] نظارت پی‌آوت فعال: اگر پی‌آوت واقعیِ یک معامله کمتر از "
@@ -286,7 +295,10 @@ async def main() -> None:
 
     tasks = [
         asyncio.create_task(
-            tick_consumer_task(tick_queue, tick_buffer, tick_history, candle_aggregator, market_structure)
+            tick_consumer_task(
+                tick_queue, tick_buffer, tick_history, candle_aggregator, market_structure,
+                micro_candle_aggregator,
+            )
         ),
         asyncio.create_task(hotkey_listener_task(data_logger, stop_event)),
         asyncio.create_task(connection_watchdog_task(ws_listener, page, stop_event)),
@@ -298,6 +310,7 @@ async def main() -> None:
                 auto_trade_task(
                     page, predictor, tick_buffer, tick_history, candle_aggregator,
                     market_structure, trade_history, click_source_holder, data_logger, stop_event,
+                    micro_candle_aggregator,
                 )
             )
         )

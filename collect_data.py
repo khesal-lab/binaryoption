@@ -60,6 +60,7 @@ async def tick_consumer_and_strategy_task(
     page,
     click_source_holder: dict,
     data_logger: DataLogger,
+    micro_candle_aggregator: CandleAggregator,
 ) -> None:
     """
     نسخهٔ گسترش‌یافتهٔ tick_consumer_task اصلی (main.py): علاوه بر
@@ -89,6 +90,7 @@ async def tick_consumer_and_strategy_task(
             candle_aggregator.reset()
             market_structure.reset()
             level_tracker.reset()
+            micro_candle_aggregator.reset()
             prev_tick = None
 
         if tick.symbol != symbol_detector.current_symbol:
@@ -106,6 +108,7 @@ async def tick_consumer_and_strategy_task(
         if closed_candle is not None:
             market_structure.ingest_closed_candle(closed_candle)
             level_tracker.on_new_candle(closed_candle)
+        micro_candle_aggregator.add_tick(tick)
 
         current_candle = candle_aggregator.current
         if current_candle is not None and prev_tick is not None and not data_logger.is_bot_trading_blocked():
@@ -185,6 +188,7 @@ async def main() -> None:
     tick_buffer = TickBuffer()
     tick_history = TickHistory()
     candle_aggregator = CandleAggregator()
+    micro_candle_aggregator = CandleAggregator(timeframe_seconds=config.MICRO_CANDLE_TIMEFRAME_SECONDS)
     market_structure = MarketStructureTracker()
     trade_history = TradeHistory()
 
@@ -212,6 +216,7 @@ async def main() -> None:
     data_logger = DataLogger(
         tick_buffer, tick_history, candle_aggregator, market_structure, trade_history, deal_buffer,
         page=page, on_result_callback=_on_trade_result,
+        micro_candle_aggregator=micro_candle_aggregator,
     )
     await data_logger.install_page_controls()
     print(f"[CollectData] نظارت پی‌آوت فعال: اگر پی‌آوت واقعیِ یک معامله کمتر از "
@@ -243,6 +248,7 @@ async def main() -> None:
             tick_consumer_and_strategy_task(
                 tick_queue, tick_buffer, tick_history, candle_aggregator, market_structure,
                 level_tracker, page, click_source_holder, data_logger,
+                micro_candle_aggregator,
             )
         ),
         asyncio.create_task(hotkey_listener_task(data_logger, stop_event)),
