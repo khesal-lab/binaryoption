@@ -180,6 +180,27 @@ def _two_sided_p_value(z: float) -> float:
     return 2 * (1 - 0.5 * (1 + math.erf(abs(z) / math.sqrt(2))))
 
 
+def _two_proportion_z_test(wins1: float, n1: int, wins2: float, n2: int) -> tuple[float, float]:
+    """z-test دو-نسبتی استاندارد (pooled). خروجی: (z, p-value دوطرفه)."""
+    if n1 == 0 or n2 == 0:
+        return 0.0, 1.0
+    p1 = wins1 / n1
+    p2 = wins2 / n2
+    pooled_p = (wins1 + wins2) / (n1 + n2)
+    se = math.sqrt(pooled_p * (1 - pooled_p) * (1 / n1 + 1 / n2))
+    z = (p1 - p2) / se if se > 0 else 0.0
+    return z, _two_sided_p_value(z)
+
+
+def _format_z_test(wins1: float, n1: int, wins2: float, n2: int, min_n: int = 30) -> str:
+    """رشتهٔ آمادهٔ چاپ برای نتیجهٔ z-test (بدون جداکنندهٔ ابتدایی - خودِ فراخوان اضافه می‌کند)."""
+    if n1 < min_n or n2 < min_n:
+        return "نمونه برای آزمایش آماری کافی نیست"
+    z, pval = _two_proportion_z_test(wins1, n1, wins2, n2)
+    flag = " ⚠️ معنادار (p<0.05)" if pval < 0.05 else ""
+    return f"z={z:+.2f}, p={pval:.3f}{flag}"
+
+
 def _report_by_symbol(df: pd.DataFrame, min_trades_for_test: int = 30) -> None:
     """
     وین‌ریت هر نماد را جداگانه گزارش می‌کند و برای نمادهایی که تعداد معاملهٔ
@@ -203,17 +224,10 @@ def _report_by_symbol(df: pd.DataFrame, min_trades_for_test: int = 30) -> None:
         p = wins / n
 
         extra = ""
-        if n >= min_trades_for_test:
-            rest_n = total_n - n
-            rest_wins = total_wins - wins
-            if rest_n > 0:
-                rest_p = rest_wins / rest_n
-                pooled_p = total_wins / total_n
-                se = math.sqrt(pooled_p * (1 - pooled_p) * (1 / n + 1 / rest_n))
-                z = (p - rest_p) / se if se > 0 else 0.0
-                pval = _two_sided_p_value(z)
-                flag = " ⚠️ معنادار (p<0.05)" if pval < 0.05 else ""
-                extra = f"  |  در برابر بقیهٔ نمادها: z={z:+.2f}, p={pval:.3f}{flag}"
+        rest_n = total_n - n
+        rest_wins = total_wins - wins
+        if n >= min_trades_for_test and rest_n > 0:
+            extra = "  |  در برابر بقیهٔ نمادها: " + _format_z_test(wins, n, rest_wins, rest_n, min_trades_for_test)
 
         vol_txt = ""
         if "volatility_ratio_short_long" in group.columns and group["volatility_ratio_short_long"].notna().any():
@@ -254,6 +268,8 @@ def _report_symbol_run_position(df: pd.DataFrame) -> None:
         print(f"  دو معاملهٔ اول بعد از هر تعویض نماد: {len(early)} معامله، وین‌ریت {early['result'].mean():.1%}")
     if len(later) > 0:
         print(f"  بقیهٔ معاملات (بعد از تثبیت روی همان نماد): {len(later)} معامله، وین‌ریت {later['result'].mean():.1%}")
+    if len(early) > 0 and len(later) > 0:
+        print(f"  آزمایش آماری: {_format_z_test(early['result'].sum(), len(early), later['result'].sum(), len(later), min_n=30)}")
 
 
 def _report_continuous_split(df: pd.DataFrame, column: str, label: str) -> None:
@@ -267,6 +283,8 @@ def _report_continuous_split(df: pd.DataFrame, column: str, label: str) -> None:
     print(f"\n--- وین‌ریت بر اساس {label} ({column})، میانه={median:.3f} ---")
     print(f"  بالاتر از میانه: {len(above)} معامله، وین‌ریت {above['result'].mean():.1%}")
     print(f"  پایین یا مساوی میانه: {len(below)} معامله، وین‌ریت {below['result'].mean():.1%}")
+    if len(above) > 0 and len(below) > 0:
+        print(f"  آزمایش آماری: {_format_z_test(above['result'].sum(), len(above), below['result'].sum(), len(below), min_n=30)}")
 
 
 def main() -> None:
@@ -322,13 +340,17 @@ def main() -> None:
         l_mean = loss_streak_trades[col].mean()
         print(f"  {col}: میانگین در زنجیرهٔ برد = {w_mean:+.3f}  |  میانگین در زنجیرهٔ باخت = {l_mean:+.3f}")
 
-    print("\nراهنمای خواندن نتیجه: در هر بخش بالا، اگر وین‌ریت دو گروه به‌وضوح از هم "
-          "فاصله داشت (مثلاً بیش از ۱۰-۱۵ واحد درصد)، یا اگر بخش «تصادفی‌بودن زنجیره‌ها» "
-          "غیرعادی بودن را نشان داد، همان فیچر مسیر خوبی برای بهبود استراتژی است. اگر همهٔ "
-          "این تفاوت‌ها ناچیز بودند و زنجیره‌ها هم در محدودهٔ طبیعی تصادف بودند، یعنی این "
-          "زنجیره‌های برد/باخت به‌احتمال زیاد فقط نوسان طبیعیِ یک استراتژی با وین‌ریت ثابت‌اند، "
-          "نه نشانهٔ یک موقعیت قابل‌تشخیص - و باید فیچرهای دیگری (یا حتی زمان/سشن معاملاتی) را "
-          "بررسی کرد.")
+    print("\nراهنمای خواندن نتیجه: در هر بخش بالا، فقط به p-value اعتماد کنید (نه فقط به "
+          "فاصلهٔ درصدی)، و اگر بخش «تصادفی‌بودن زنجیره‌ها» غیرعادی بودن را نشان داد، همان "
+          "فیچر مسیر خوبی برای بهبود استراتژی است. اگر همهٔ این تفاوت‌ها معنادار نبودند و "
+          "زنجیره‌ها هم در محدودهٔ طبیعی تصادف بودند، یعنی این زنجیره‌های برد/باخت به‌احتمال "
+          "زیاد فقط نوسان طبیعیِ یک استراتژی با وین‌ریت ثابت‌اند، نه نشانهٔ یک موقعیت قابل‌تشخیص.")
+    print("\n⚠️ نکتهٔ آماری مهم: در این گزارش حدود ۱۵-۲۰ آزمایش/مقایسهٔ جداگانه انجام شده "
+          "(هر نماد، هر فیچر پیوسته، هر فیچر هم‌جهتی). با آستانهٔ معمول p<0.05، حتی اگر هیچ "
+          "الگوی واقعی‌ای در کار نباشد، به‌طور تصادفی انتظار می‌رود ۱-۲ تای این آزمایش‌ها به‌طور "
+          "کاذب «معنادار» به نظر برسند (مسئلهٔ Multiple Comparisons). پس یک نتیجهٔ تک با "
+          "p نزدیک به ۰.۰۵ (نه خیلی کمتر) را با احتیاط ببینید - تأیید واقعی وقتی است که همان "
+          "الگو روی دادهٔ تازه/بیشتر (نه همین دیتاست) هم دوباره دیده شود.")
 
 
 if __name__ == "__main__":
