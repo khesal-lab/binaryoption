@@ -61,13 +61,30 @@ class PendingTrade:
     source: str = "manual"  # "manual" (کلیک کاربر) یا "bot" (کلیک خودکار مدل)
 
 
+def _is_refund_deal(lower_map: dict) -> bool:
+    """
+    آیا این پیام «نتیجهٔ معامله» نشان می‌دهد پلتفرم خودش مبلغ را ریفاند کرده
+    (نه برد نه باخت واقعی - مثلاً به‌خاطر مشکل سرور یا تساوی قیمت)؟ خودِ
+    Pocket Option این را با فیلدهای refundTime/refundTimestamp غیر-null در
+    پیام نتیجهٔ معامله (updateClosedDeals) نشان می‌دهد.
+    """
+    for key in ("refundtime", "refundtimestamp"):
+        if lower_map.get(key) not in (None, 0, "", "null"):
+            return True
+    return False
+
+
 def _interpret_deal_candidate(deal: dict) -> Optional[int]:
     """
     تلاش می‌کند از یک دیکشنری کاندیدای «نتیجهٔ معامله» یک لیبل ۰/۱ دربیاورد.
-    ترتیب اولویت: کلیدهای صریح برد/باخت، سپس کلیدهای عددی سود/زیان.
-    اگر هیچ‌کدام قابل تفسیر نبود، None برمی‌گرداند (یعنی از fallback استفاده شود).
+    ترتیب اولویت: اول ریفاند صریح (config.REFUND_COUNTS_AS_LOSS)، بعد کلیدهای
+    صریح برد/باخت، سپس کلیدهای عددی سود/زیان. اگر هیچ‌کدام قابل تفسیر نبود،
+    None برمی‌گرداند (یعنی از fallback استفاده شود).
     """
     lower_map = {str(k).lower(): v for k, v in deal.items()}
+
+    if _is_refund_deal(lower_map):
+        return 0 if config.REFUND_COUNTS_AS_LOSS else 1
 
     for key in ("iswin", "is_win", "win"):
         if key in lower_map:
