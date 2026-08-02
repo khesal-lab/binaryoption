@@ -47,6 +47,7 @@ from src.trade_click_listener import attach_trade_button_listeners
 from src.trade_executor import click_trade_button
 from src.live_predictor import LivePredictor
 from src.symbol_tracker import SymbolSwitchDetector
+from src.config_reloader import config_hot_reload_task
 
 
 async def tick_consumer_task(
@@ -296,6 +297,10 @@ async def main() -> None:
     print(f"[Main] نظارت پی‌آوت فعال: اگر پی‌آوت واقعیِ یک معامله کمتر از "
           f"{config.MIN_PAYOUT_PERCENT}٪ باشد، معاملهٔ خودکار (AUTO_TRADE) متوقف می‌شود.")
     print("[Main] یک دکمهٔ «توقف/ازسرگیری معاملهٔ خودکار» هم پایین-چپ صفحهٔ مرورگر اضافه شد.")
+    print(f"[Main] توقف بعد از باخت متوالی: {config.CONSECUTIVE_LOSSES_FOR_COOLDOWN} باخت پیاپی -> "
+          f"{config.CONSECUTIVE_LOSS_COOLDOWN_SECONDS:.0f} ثانیه توقف.")
+    print("[Main] بارگذاری زندهٔ config.py فعال است - تغییر config.py در حین اجرا (بدون نیاز به "
+          "ری‌استارت) روی مقادیری مثل توقف باخت متوالی/پی‌آوت/آستانهٔ اطمینان اعمال می‌شود.")
 
     # وقتی معاملهٔ خودکار (auto_trade_task) دکمه را برنامه‌ای کلیک می‌کند، درست
     # قبل از کلیک این مقدار را به "bot" تغییر می‌دهد؛ شنوندهٔ کلیک زیر که هم
@@ -336,6 +341,7 @@ async def main() -> None:
         ),
         asyncio.create_task(hotkey_listener_task(data_logger, stop_event)),
         asyncio.create_task(connection_watchdog_task(ws_listener, page, stop_event)),
+        asyncio.create_task(config_hot_reload_task(stop_event)),
     ]
 
     if predictor is not None:

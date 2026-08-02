@@ -107,10 +107,10 @@ LOW_PAYOUT_CONFIRM_TRADES = 2
 # دستور «resume» دستی دارد)، این توقف کوتاه‌مدت است و بعد از گذشت
 # CONSECUTIVE_LOSS_COOLDOWN_SECONDS ثانیه خودش به‌طور خودکار تمام می‌شود.
 # معاملهٔ دستی شما هرگز توسط این مکانیزم مسدود نمی‌شود.
-CONSECUTIVE_LOSSES_FOR_COOLDOWN = 2
+CONSECUTIVE_LOSSES_FOR_COOLDOWN = 5
 
 # مدت این توقف کوتاه (بر حسب ثانیه) بعد از رسیدن به تعداد باخت متوالی بالا.
-CONSECUTIVE_LOSS_COOLDOWN_SECONDS = 15
+CONSECUTIVE_LOSS_COOLDOWN_SECONDS = 120
 
 # ---------------------------------------------------------------------------
 # مسیر ذخیره‌سازی داده‌ها

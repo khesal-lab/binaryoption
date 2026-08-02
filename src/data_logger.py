@@ -159,8 +159,8 @@ class DataLogger:
         sqlite_path=config.SQLITE_DB_PATH,
         expiry_seconds: float = config.TRADE_EXPIRY_SECONDS,
         deal_result_wait_seconds: float = config.DEAL_RESULT_WAIT_SECONDS,
-        consecutive_losses_for_cooldown: int = config.CONSECUTIVE_LOSSES_FOR_COOLDOWN,
-        consecutive_loss_cooldown_seconds: float = config.CONSECUTIVE_LOSS_COOLDOWN_SECONDS,
+        consecutive_losses_for_cooldown: Optional[int] = None,
+        consecutive_loss_cooldown_seconds: Optional[float] = None,
         micro_candle_aggregator: Optional[CandleAggregator] = None,
     ):
         self.tick_buffer = tick_buffer
@@ -184,8 +184,14 @@ class DataLogger:
         self.sqlite_path = sqlite_path
         self.expiry_seconds = expiry_seconds
         self.deal_result_wait_seconds = deal_result_wait_seconds
-        self.consecutive_losses_for_cooldown = consecutive_losses_for_cooldown
-        self.consecutive_loss_cooldown_seconds = consecutive_loss_cooldown_seconds
+        # اگر مقدار صریحی داده نشده باشد (حالت عادی - main.py/collect_data.py هیچ‌کدام
+        # این دو پارامتر را پاس نمی‌دهند)، این دو مقدار همیشه مستقیم از خودِ ماژول
+        # config خوانده می‌شوند (نه یک‌بار اسنپ‌شات‌شده این‌جا) - تا اگر config.py در حین
+        # اجرا تغییر کند و config_reloader.py دوباره‌اش را reload کند، همین‌جا هم بدون
+        # نیاز به ری‌استارت اسکریپت بلافاصله اثر بگذارد. تست‌ها می‌توانند برای مقدار
+        # ثابت/سریع، این پارامترها را صریح پاس بدهند.
+        self._consecutive_losses_for_cooldown_override = consecutive_losses_for_cooldown
+        self._consecutive_loss_cooldown_seconds_override = consecutive_loss_cooldown_seconds
         # وین‌ریت جداگانه فقط برای معاملاتی که خودِ ربات (نه کاربر) باز کرده،
         # تا بشود عملکرد لحظه‌ای مدل را مستقل از معاملات دستی دنبال کرد.
         self.bot_trade_history = TradeHistory()
@@ -211,6 +217,18 @@ class DataLogger:
         self._loss_cooldown_until_monotonic: float = 0.0
 
         self._init_sqlite()
+
+    @property
+    def consecutive_losses_for_cooldown(self) -> int:
+        if self._consecutive_losses_for_cooldown_override is not None:
+            return self._consecutive_losses_for_cooldown_override
+        return config.CONSECUTIVE_LOSSES_FOR_COOLDOWN
+
+    @property
+    def consecutive_loss_cooldown_seconds(self) -> float:
+        if self._consecutive_loss_cooldown_seconds_override is not None:
+            return self._consecutive_loss_cooldown_seconds_override
+        return config.CONSECUTIVE_LOSS_COOLDOWN_SECONDS
 
     # -- راه‌اندازی اولیهٔ SQLite ---------------------------------------------
     def _init_sqlite(self) -> None:
