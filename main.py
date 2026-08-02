@@ -200,7 +200,7 @@ async def auto_trade_task(
     while not stop_event.is_set():
         await asyncio.sleep(poll_interval)
 
-        if data_logger.trading_paused:
+        if data_logger.is_bot_trading_blocked():
             continue
 
         now = time.monotonic()
