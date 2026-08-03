@@ -128,6 +128,97 @@ def extract_ticks_from_payload(payload) -> list[Tick]:
     return ticks
 
 
+# پیام updateAssets لیست کامل دارایی‌های قابل‌معامله و پی‌آوت لحظه‌ایِ هرکدام را
+# می‌فرستد. هر ردیف چیزی شبیه این است (نمونهٔ واقعی مشاهده‌شده در
+# data/raw_ws_frames.log):
+#   [5,"#AAPL","Apple","stock",2,50,60,30,3,0,170,0,[],1785256500,false,[...],-1,60,1785256500]
+# اندیس ۱ = نماد (با پیشوند #)، اندیس ۳ = نوع دارایی (stock/currency/...)،
+# اندیس ۵ = درصد پی‌آوت لحظه‌ای. مثل بقیهٔ این ماژول، فرمت رسمی مستند نیست؛
+# این هم یک هیوریستیک است (نه استخراج دقیق بر اساس مستندات پروتکل).
+def _looks_like_asset_payout_row(item) -> bool:
+    if not isinstance(item, (list, tuple)) or len(item) < 6:
+        return False
+    symbol, _display_name, asset_type, payout = item[1], item[2], item[3], item[5]
+    return (
+        isinstance(symbol, str)
+        and symbol.startswith("#")
+        and isinstance(asset_type, str)
+        and isinstance(payout, (int, float))
+        and 0 <= payout <= 100
+    )
+
+
+def extract_asset_payouts_from_payload(payload) -> list[dict]:
+    """
+    به‌صورت بازگشتی دنبال ردیف‌های شبیه دارایی/پی‌آوت (پیام updateAssets)
+    می‌گردد. خروجی: لیستی از {"symbol", "asset_type", "payout_percent"}.
+    """
+    results: list[dict] = []
+
+    def _walk(node):
+        if _looks_like_asset_payout_row(node):
+            results.append({
+                "symbol": node[1].lstrip("#"),
+                "asset_type": node[3],
+                "payout_percent": float(node[5]),
+            })
+            return
+        if isinstance(node, list):
+            for child in node:
+                _walk(child)
+        elif isinstance(node, dict):
+            for child in node.values():
+                _walk(child)
+
+    _walk(payload)
+    return results
+
+
+class AssetPayoutTracker:
+    """
+    آخرین درصد پی‌آوت شناخته‌شده برای هر نماد را نگه می‌دارد (از روی پیام‌های
+    updateAssets که پلتفرم به‌صورت دوره‌ای/هنگام تغییر می‌فرستد). هدف: در لحظهٔ
+    ورود به یک معامله بشود فهمید این نماد در حال حاضر نسبت به سایر دارایی‌های
+    هم‌نوع (هم asset_type) در کجای «لیست پی‌آوت» قرار دارد - به‌عنوان یک سیگنال
+    نسبیِ رژیم بازار، نه یک شناسهٔ ثابت نماد.
+    """
+
+    def __init__(self):
+        self._payouts: dict[str, dict] = {}
+
+    def update_from_payload(self, payload) -> None:
+        for entry in extract_asset_payouts_from_payload(payload):
+            self._payouts[entry["symbol"]] = entry
+
+    def get_payout(self, symbol: str) -> Optional[float]:
+        entry = self._payouts.get(symbol)
+        return entry["payout_percent"] if entry else None
+
+    def get_rank_percentile(self, symbol: str) -> Optional[dict]:
+        """
+        رتبه (۱=بالاترین پی‌آوت) و صدک (۰=بالاترین، ۱=پایین‌ترین) این نماد در
+        مقایسه با سایر نمادهای هم‌نوع (همان asset_type) که تا این لحظه دیده
+        شده‌اند. اگر خودِ نماد یا حداقل یک همتای دیگر هنوز دیده نشده باشد
+        (مقایسه‌ای بی‌معنی با فقط یک عضو)، None برمی‌گرداند.
+        """
+        entry = self._payouts.get(symbol)
+        if entry is None:
+            return None
+        peers = [
+            e["payout_percent"] for e in self._payouts.values()
+            if e.get("asset_type") == entry.get("asset_type")
+        ]
+        if len(peers) < 2:
+            return None
+        peers_sorted = sorted(peers, reverse=True)
+        rank = peers_sorted.index(entry["payout_percent"]) + 1
+        return {
+            "payout_rank": rank,
+            "payout_total_peers": len(peers),
+            "payout_percentile": (rank - 1) / (len(peers) - 1),
+        }
+
+
 # کلیدهایی که در پیام‌های «نتیجهٔ معامله»/«بستن قرارداد» بروکرهای مشابه معمولاً دیده می‌شوند.
 # فرمت دقیق Pocket Option مستند نیست؛ این یک حدس منطقی است که باید با نگاه‌کردن به
 # data/raw_ws_frames.log بعد از چند معاملهٔ واقعی تأیید/اصلاح شود.
@@ -193,9 +284,15 @@ class WebSocketListener:
     داخل یک asyncio.Queue می‌ریزد و در صورت قطع اتصال، وضعیت را لاگ می‌کند.
     """
 
-    def __init__(self, tick_queue: asyncio.Queue, deal_buffer: Optional[DealResultBuffer] = None):
+    def __init__(
+        self,
+        tick_queue: asyncio.Queue,
+        deal_buffer: Optional[DealResultBuffer] = None,
+        asset_payout_tracker: Optional[AssetPayoutTracker] = None,
+    ):
         self.tick_queue = tick_queue
         self.deal_buffer = deal_buffer
+        self.asset_payout_tracker = asset_payout_tracker
         self._active_sockets: set[WebSocket] = set()
         self.connected_event = asyncio.Event()
 
@@ -243,6 +340,9 @@ class WebSocketListener:
         if self.deal_buffer is not None:
             for deal in extract_deal_candidates(payload):
                 self.deal_buffer.add(deal)
+
+        if self.asset_payout_tracker is not None:
+            self.asset_payout_tracker.update_from_payload(payload)
 
 
 async def launch_browser_and_wait_for_login() -> tuple[BrowserContext, Page]:

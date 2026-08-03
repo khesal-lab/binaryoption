@@ -34,6 +34,7 @@ import time
 
 import config
 from src.browser_session import (
+    AssetPayoutTracker,
     DealResultBuffer,
     WebSocketListener,
     launch_browser_and_wait_for_login,
@@ -202,10 +203,11 @@ async def main() -> None:
         level_tracker = LevelStrategyTracker()
 
     deal_buffer = DealResultBuffer()
+    asset_payout_tracker = AssetPayoutTracker()
 
     context, page = await launch_browser_and_wait_for_login()
 
-    ws_listener = WebSocketListener(tick_queue, deal_buffer)
+    ws_listener = WebSocketListener(tick_queue, deal_buffer, asset_payout_tracker)
     ws_listener.attach(page)
 
     def _on_trade_result(source: str, result: int) -> None:
@@ -218,6 +220,7 @@ async def main() -> None:
         tick_buffer, tick_history, candle_aggregator, market_structure, trade_history, deal_buffer,
         page=page, on_result_callback=_on_trade_result,
         micro_candle_aggregator=micro_candle_aggregator,
+        asset_payout_tracker=asset_payout_tracker,
     )
     await data_logger.install_page_controls()
     print(f"[CollectData] نظارت پی‌آوت فعال: اگر پی‌آوت واقعیِ یک معامله کمتر از "

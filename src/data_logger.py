@@ -41,7 +41,7 @@ from typing import Callable, Literal, Optional
 import pandas as pd
 
 import config
-from src.browser_session import DealResultBuffer
+from src.browser_session import DealResultBuffer, AssetPayoutTracker
 from src.feature_engineering import TickBuffer, TickHistory, CandleAggregator, build_feature_snapshot
 from src.market_structure import MarketStructureTracker
 from src.state_tracker import TradeHistory
@@ -161,6 +161,7 @@ class DataLogger:
         deal_result_wait_seconds: float = config.DEAL_RESULT_WAIT_SECONDS,
         consecutive_loss_cooldown_tiers: Optional[list[tuple[int, float]]] = None,
         micro_candle_aggregator: Optional[CandleAggregator] = None,
+        asset_payout_tracker: Optional[AssetPayoutTracker] = None,
     ):
         self.tick_buffer = tick_buffer
         self.tick_history = tick_history
@@ -169,6 +170,10 @@ class DataLogger:
         # «شکل چارت» ریز به اسنپ‌شات هر معامله (micro_chart_shape_json)؛ اگر داده
         # نشود، این ویژگی صرفاً از اسنپ‌شات حذف می‌ماند.
         self.micro_candle_aggregator = micro_candle_aggregator
+        # اختیاری: آخرین درصد پی‌آوت شناخته‌شدهٔ همهٔ دارایی‌ها (از پیام updateAssets
+        # وب‌ساکت) - برای این‌که در لحظهٔ ورود بشود ثبت کرد نمادِ همین معامله در حال
+        # حاضر نسبت به سایر دارایی‌های هم‌نوع در چه رتبه/صدکی از «لیست پی‌آوت» است.
+        self.asset_payout_tracker = asset_payout_tracker
         self.market_structure = market_structure
         self.trade_history = trade_history
         self.deal_buffer = deal_buffer
@@ -285,6 +290,21 @@ class DataLogger:
             self.market_structure.get_features(latest.price, latest.timestamp, self.candle_aggregator.current)
         )
         snapshot.update(self.trade_history.as_feature_dict())
+
+        # پی‌آوت لحظهٔ ورود (نه پی‌آوت واقعی بعد از بسته‌شدن معامله که meta_payout_percent
+        # است) - از لیست کامل دارایی‌ها که پلتفرم دوره‌ای broadcast می‌کند. رتبه/صدک
+        # نسبت به سایر دارایی‌های هم‌نوع، نه خودِ نماد، تا مدل بتواند یاد بگیرد که آیا
+        # «در صدر لیست پی‌آوت بودن» با رژیم/رفتار خاصی از بازار همبسته است یا نه.
+        current_payout = None
+        payout_rank_info = None
+        if self.asset_payout_tracker is not None:
+            current_payout = self.asset_payout_tracker.get_payout(latest.symbol)
+            payout_rank_info = self.asset_payout_tracker.get_rank_percentile(latest.symbol)
+        snapshot["current_symbol_payout_percent"] = current_payout
+        snapshot["current_symbol_payout_percentile"] = (
+            payout_rank_info["payout_percentile"] if payout_rank_info else None
+        )
+
         snapshot["direction"] = direction
         snapshot["meta_trade_source"] = source
 
