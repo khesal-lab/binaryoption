@@ -65,21 +65,50 @@ def _is_refund_deal(node) -> bool:
     """
     آیا این پیام «نتیجهٔ معامله» (یا هرکدام از دیکشنری‌های تودرتوی آن، مثل
     لیست "deals" در successcloseOrder) نشان می‌دهد پلتفرم خودش مبلغ را ریفاند
-    کرده (نه برد نه باخت واقعی - مثلاً به‌خاطر مشکل سرور یا تساوی قیمت)؟ خودِ
-    Pocket Option این را با فیلدهای refundTime/refundTimestamp غیر-null نشان
-    می‌دهد. بازگشتی است چون این فیلدها معمولاً روی خودِ دیکشنریِ سطح بالا
-    نیستند، بلکه داخل هر آیتم لیست تودرتوی معاملات‌اند - یک بررسی فقط-سطح‌بالا
-    این را نادیده می‌گرفت و باعث می‌شد معاملات ریفاندی به‌اشتباه WIN لیبل بخورند.
+    کرده (نه برد نه باخت واقعی - مثلاً به‌خاطر تساوی دقیق قیمت باز و بسته شدن)؟
+    دو نشانهٔ مستقل بررسی می‌شود:
+        ۱. فیلدهای صریح refundTime/refundTimestamp غیر-null (مستندسازی رایج
+           این پیام‌ها در بروکرهای مشابه).
+        ۲. profit دقیقاً صفر - بر اساس بررسی ۲۵۳۵ معاملهٔ واقعی از گزارش خروجی
+           خودِ Pocket Option، این حالت همیشه (بدون هیچ استثنا) دقیقاً با
+           open_price == close_price هم‌زمان بود؛ یعنی روی این حساب، ریفاند/
+           تساوی اصلاً فیلد refundTime جداگانه‌ای ندارد و تنها نشانه‌اش همین
+           profit=0 است (برخلاف WIN که همیشه مثبت و LOSS که همیشه دقیقاً
+           برابر منفیِ کل مبلغ سرمایه است - هیچ‌وقت این دو با هم قاطی نمی‌شوند).
+    بازگشتی است چون این فیلدها معمولاً روی خودِ دیکشنریِ سطح بالا نیستند، بلکه
+    داخل هر آیتم لیست تودرتوی معاملات‌اند - یک بررسی فقط-سطح‌بالا این را
+    نادیده می‌گرفت و باعث می‌شد معاملات ریفاندی به‌اشتباه WIN یا LOSS لیبل بخورند.
     """
     if isinstance(node, dict):
         lower_map = {str(k).lower(): v for k, v in node.items()}
         for key in ("refundtime", "refundtimestamp"):
             if lower_map.get(key) not in (None, 0, "", "null"):
                 return True
+        profit = lower_map.get("profit")
+        if isinstance(profit, (int, float)) and abs(profit) < 1e-9:
+            return True
         return any(_is_refund_deal(v) for v in node.values())
     if isinstance(node, list):
         return any(_is_refund_deal(item) for item in node)
     return False
+
+
+def _resolve_deal_dict(deal: dict) -> dict:
+    """
+    اگر این دیکشنری یک لیست "deals" غیرخالی داشته باشد (فرمت successcloseOrder:
+    {"profit": X, "deals": [{...نتیجهٔ واقعی معاملهٔ مشخص...}]})، اولین آیتم
+    همان لیست برگردانده می‌شود - نه فیلد "profit" سطح بالای خودِ wrapper.
+
+    این فیلد سطح بالا همیشه با نتیجهٔ واقعیِ تک‌تک معاملات یکی نیست: در یک
+    نمونهٔ واقعیِ ریفاند/تساوی دیده شد که outer.profit=100 بود (احتمالاً مبلغ
+    برگشتی به موجودی) درحالی‌که deals[0].profit=0 بود (نتیجهٔ واقعی: نه برد نه
+    باخت). خواندن فیلد بیرونی به‌تنهایی می‌توانست این معامله را WIN غلط تفسیر
+    کند. تکیه بر داده‌های سطح دیکشنریِ داخلی همیشه درست‌تر و بدون ابهام است.
+    """
+    deals = deal.get("deals")
+    if isinstance(deals, list) and deals and isinstance(deals[0], dict):
+        return deals[0]
+    return deal
 
 
 def _interpret_deal_candidate(deal: dict) -> Optional[int]:
@@ -89,6 +118,8 @@ def _interpret_deal_candidate(deal: dict) -> Optional[int]:
     صریح برد/باخت، سپس کلیدهای عددی سود/زیان. اگر هیچ‌کدام قابل تفسیر نبود،
     None برمی‌گرداند (یعنی از fallback استفاده شود).
     """
+    deal = _resolve_deal_dict(deal)
+
     if _is_refund_deal(deal):
         return 0 if config.REFUND_COUNTS_AS_LOSS else 1
 
@@ -104,7 +135,11 @@ def _interpret_deal_candidate(deal: dict) -> Optional[int]:
             if isinstance(value, str):
                 return int(value.strip().lower() in ("1", "true", "win"))
 
-    for key in ("profit", "amount", "payout", "closeprofit", "close_profit"):
+    # توجه: عمداً "amount"/"payout" این‌جا نیستند - این دو همیشه مقداری مثبت‌اند
+    # (اندازهٔ سرمایه/درصد پی‌آوت)، صرف‌نظر از برد یا باخت، پس هرگز نباید به‌عنوان
+    # نشانهٔ جهت‌دار نتیجه تفسیر شوند (اگر "profit" در پیام نبود ولی فقط "amount"
+    # بود، این کد قبلاً هر معامله را به‌اشتباه WIN گزارش می‌کرد).
+    for key in ("profit", "closeprofit", "close_profit"):
         if key in lower_map and isinstance(lower_map[key], (int, float)):
             return int(lower_map[key] > 0)
 
@@ -132,6 +167,7 @@ def _extract_payout_percent(raw_deal: Optional[dict], result: int) -> Optional[f
     """
     if raw_deal is None:
         return None
+    raw_deal = _resolve_deal_dict(raw_deal)
     lower_map = {str(k).lower(): v for k, v in raw_deal.items()}
 
     if "payout" in lower_map and isinstance(lower_map["payout"], (int, float)):
@@ -141,7 +177,13 @@ def _extract_payout_percent(raw_deal: Optional[dict], result: int) -> Optional[f
     if result == 1:
         profit = lower_map.get("profit")
         amount = lower_map.get("amount")
-        if isinstance(profit, (int, float)) and isinstance(amount, (int, float)) and amount > 0:
+        # profit صفر یعنی ریفاند (نه یک برد با پی‌آوت ۰٪) - نباید این‌جا به‌عنوان
+        # پی‌آوت ۰٪ محاسبه شود، وگرنه معاملهٔ ریفاندی به‌اشتباه در آستانهٔ
+        # MIN_PAYOUT_PERCENT فعال می‌کند.
+        if (
+            isinstance(profit, (int, float)) and isinstance(amount, (int, float))
+            and amount > 0 and abs(profit) > 1e-9
+        ):
             return (profit / amount) * 100
 
     return None
@@ -377,13 +419,24 @@ class DataLogger:
         if self.on_result_callback is not None:
             self.on_result_callback(pending.source, result)
 
-        payout_percent = _extract_payout_percent(raw_deal, result)
+        # اولویت با پی‌آوت زندهٔ همین نماد از AssetPayoutTracker (از پیام
+        # updateAssets) است - چون این مستقل از نتیجهٔ معامله همیشه در دسترس است؛
+        # روش قدیمی‌تر (محاسبه از profit/amount پیام نتیجهٔ معامله) فقط وقتی
+        # معامله واقعاً WIN شده باشد قابل‌محاسبه است (در LOSS، بازگشت همیشه صفر
+        # است صرف‌نظر از این‌که پی‌آوت واقعی چقدر بوده) - یعنی افت پی‌آوت دقیقاً
+        # در بازه‌ای که معاملات پشت‌سرهم باخت می‌خورند، قبلاً اصلاً دیده نمی‌شد.
+        payout_percent = (
+            self.asset_payout_tracker.get_payout(pending.entry_symbol)
+            if self.asset_payout_tracker is not None else None
+        )
+        if payout_percent is None:
+            payout_percent = _extract_payout_percent(raw_deal, result)
         # آیا خودِ پلتفرم این معامله را ریفاند کرده (نه برد نه باخت واقعی)؟ این
         # مستقل از این‌که config.REFUND_COUNTS_AS_LOSS چه لیبل عددی‌ای به آن
         # می‌دهد ثبت می‌شود - تا هم در ترمینال به‌جای WIN گمراه‌کننده، صریحاً
         # REFUND نشان داده شود، هم بعداً در تحلیل/آموزش بشود این ردیف‌ها را
         # جدا فیلتر کرد.
-        is_refund = _is_refund_deal(raw_deal) if raw_deal is not None else False
+        is_refund = _is_refund_deal(_resolve_deal_dict(raw_deal)) if raw_deal is not None else False
 
         row = dict(pending.feature_snapshot)
         # ستون‌های meta_* فقط برای ردیابی/دیباگ‌اند؛ مقدار خام قیمت دارند و
