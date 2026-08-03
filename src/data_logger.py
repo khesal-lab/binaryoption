@@ -104,7 +104,11 @@ def _interpret_deal_candidate(deal: dict) -> Optional[int]:
             if isinstance(value, str):
                 return int(value.strip().lower() in ("1", "true", "win"))
 
-    for key in ("profit", "amount", "payout", "closeprofit", "close_profit"):
+    # توجه: عمداً "amount"/"payout" این‌جا نیستند - این دو همیشه مقداری مثبت‌اند
+    # (اندازهٔ سرمایه/درصد پی‌آوت)، صرف‌نظر از برد یا باخت، پس هرگز نباید به‌عنوان
+    # نشانهٔ جهت‌دار نتیجه تفسیر شوند (اگر "profit" در پیام نبود ولی فقط "amount"
+    # بود، این کد قبلاً هر معامله را به‌اشتباه WIN گزارش می‌کرد).
+    for key in ("profit", "closeprofit", "close_profit"):
         if key in lower_map and isinstance(lower_map[key], (int, float)):
             return int(lower_map[key] > 0)
 
@@ -377,7 +381,18 @@ class DataLogger:
         if self.on_result_callback is not None:
             self.on_result_callback(pending.source, result)
 
-        payout_percent = _extract_payout_percent(raw_deal, result)
+        # اولویت با پی‌آوت زندهٔ همین نماد از AssetPayoutTracker (از پیام
+        # updateAssets) است - چون این مستقل از نتیجهٔ معامله همیشه در دسترس است؛
+        # روش قدیمی‌تر (محاسبه از profit/amount پیام نتیجهٔ معامله) فقط وقتی
+        # معامله واقعاً WIN شده باشد قابل‌محاسبه است (در LOSS، بازگشت همیشه صفر
+        # است صرف‌نظر از این‌که پی‌آوت واقعی چقدر بوده) - یعنی افت پی‌آوت دقیقاً
+        # در بازه‌ای که معاملات پشت‌سرهم باخت می‌خورند، قبلاً اصلاً دیده نمی‌شد.
+        payout_percent = (
+            self.asset_payout_tracker.get_payout(pending.entry_symbol)
+            if self.asset_payout_tracker is not None else None
+        )
+        if payout_percent is None:
+            payout_percent = _extract_payout_percent(raw_deal, result)
         # آیا خودِ پلتفرم این معامله را ریفاند کرده (نه برد نه باخت واقعی)؟ این
         # مستقل از این‌که config.REFUND_COUNTS_AS_LOSS چه لیبل عددی‌ای به آن
         # می‌دهد ثبت می‌شود - تا هم در ترمینال به‌جای WIN گمراه‌کننده، صریحاً
