@@ -27,9 +27,11 @@
 from __future__ import annotations
 
 import json
+import math
 import statistics
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
@@ -724,6 +726,34 @@ class CandleAggregator:
 # ---------------------------------------------------------------------------
 # بخش ۲.۴ — ترکیب ویژگی‌های تیک/کندل در یک دیکشنری واحد (بدون قیمت خام)
 # ---------------------------------------------------------------------------
+def compute_time_of_day_features(timestamp: Optional[float]) -> dict:
+    """
+    ساعت روز و روز هفته (به‌وقت UTC، همان ساعتی که تیک‌ها با آن رسیده‌اند) را
+    به‌صورت چرخه‌ای (sin/cos) کدگذاری می‌کند - نه یک عدد خام ساعت (۰ تا ۲۳)، چون
+    عدد خام یعنی ساعت ۲۳ و ساعت ۰ برای مدل «دورترین» مقادیر ممکن به‌نظر می‌رسند
+    درحالی‌که در واقعیت فقط یک ساعت فاصله دارند؛ کدگذاری sin/cos این پیوستگی
+    دایره‌ای را حفظ می‌کند. هدف: امکان یادگیری الگوهای وابسته به بازهٔ زمانی
+    (مثلاً نوسان/نقدینگی متفاوت شب در برابر صبح، یا روزهای هفته در برابر تعطیلات
+    آخر هفته در جفت‌ارزهای OTC).
+    """
+    if timestamp is None:
+        return {
+            "hour_of_day_sin": None,
+            "hour_of_day_cos": None,
+            "day_of_week_sin": None,
+            "day_of_week_cos": None,
+        }
+    dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    hour_frac = dt.hour + dt.minute / 60.0
+    day_of_week = dt.weekday()  # ۰=دوشنبه ... ۶=یکشنبه
+    return {
+        "hour_of_day_sin": math.sin(2 * math.pi * hour_frac / 24.0),
+        "hour_of_day_cos": math.cos(2 * math.pi * hour_frac / 24.0),
+        "day_of_week_sin": math.sin(2 * math.pi * day_of_week / 7.0),
+        "day_of_week_cos": math.cos(2 * math.pi * day_of_week / 7.0),
+    }
+
+
 def build_feature_snapshot(
     tick_buffer: TickBuffer,
     tick_history: TickHistory,
@@ -737,7 +767,9 @@ def build_feature_snapshot(
     DataLogger با این خروجی ترکیب می‌شوند.
     """
     latest = tick_buffer.latest()
+    time_reference = latest.timestamp if latest else (candle_aggregator.current.start_time if candle_aggregator.current else None)
     snapshot: dict = {
+        **compute_time_of_day_features(time_reference),
         "velocity_pct": tick_buffer.get_velocity_pct(),
         "acceleration_pct": tick_buffer.get_acceleration_pct(),
         "velocity_pct_smoothed": tick_buffer.get_velocity_pct_smoothed(),
@@ -800,10 +832,34 @@ def build_feature_snapshot(
         snapshot["prev_move_size_ratio"] = None
         snapshot["tick_vs_candle_alignment"] = None
 
-    if candle_aggregator.get_previous_candle():
-        snapshot.update(candle_aggregator.get_previous_candle().as_dict("candle_prev1"))
+    history_list = list(candle_aggregator.history)
+    prev1 = history_list[-1] if history_list else None
+    prev2 = history_list[-2] if len(history_list) >= 2 else None
 
-    snapshot.update(compare_recent_candles(candle_aggregator.history, n=3))
+    if prev1:
+        snapshot.update(prev1.as_dict("candle_prev1"))
+    if prev2:
+        snapshot.update(prev2.as_dict("candle_prev2"))
+
+    # نسبت اندازهٔ (رنج) کندلِ در حال شکل‌گیری فعلی به دو کندل تکمیل‌شدهٔ قبلی،
+    # و هم‌رنگ بودن کندل جاری با هرکدام. compare_recent_candles پایین‌تر فقط
+    # کندل‌های تکمیل‌شده را با هم مقایسه می‌کند (prev1 با prev2، prev2 با prev3
+    # و ...)؛ این‌جا مقایسهٔ کندل جاری (که هنوز تکمیل نشده) با هرکدام از آن دو
+    # کندل قبلی اضافه می‌شود - قبلاً چنین مقایسه‌ای اصلاً وجود نداشت.
+    snapshot["candle_curr_vs_prev1_range_ratio"] = (
+        (current_candle.range / prev1.range) if current_candle and prev1 and prev1.range > 0 else None
+    )
+    snapshot["candle_curr_color_match_prev1"] = (
+        int(current_candle.is_bullish == prev1.is_bullish) if current_candle and prev1 else None
+    )
+    snapshot["candle_curr_vs_prev2_range_ratio"] = (
+        (current_candle.range / prev2.range) if current_candle and prev2 and prev2.range > 0 else None
+    )
+    snapshot["candle_curr_color_match_prev2"] = (
+        int(current_candle.is_bullish == prev2.is_bullish) if current_candle and prev2 else None
+    )
+
+    snapshot.update(compare_recent_candles(history_list, n=3))
 
     # شکل نرمال‌شدهٔ چند کندل ریزِ چندثانیه‌ای اخیر (مستقل از کندل یک‌دقیقه‌ای
     # بالا) - تا مدل تصویری از رفتار قیمت درست در همان چند ثانیهٔ منتهی به
