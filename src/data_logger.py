@@ -65,17 +65,28 @@ def _is_refund_deal(node) -> bool:
     """
     آیا این پیام «نتیجهٔ معامله» (یا هرکدام از دیکشنری‌های تودرتوی آن، مثل
     لیست "deals" در successcloseOrder) نشان می‌دهد پلتفرم خودش مبلغ را ریفاند
-    کرده (نه برد نه باخت واقعی - مثلاً به‌خاطر مشکل سرور یا تساوی قیمت)؟ خودِ
-    Pocket Option این را با فیلدهای refundTime/refundTimestamp غیر-null نشان
-    می‌دهد. بازگشتی است چون این فیلدها معمولاً روی خودِ دیکشنریِ سطح بالا
-    نیستند، بلکه داخل هر آیتم لیست تودرتوی معاملات‌اند - یک بررسی فقط-سطح‌بالا
-    این را نادیده می‌گرفت و باعث می‌شد معاملات ریفاندی به‌اشتباه WIN لیبل بخورند.
+    کرده (نه برد نه باخت واقعی - مثلاً به‌خاطر تساوی دقیق قیمت باز و بسته شدن)؟
+    دو نشانهٔ مستقل بررسی می‌شود:
+        ۱. فیلدهای صریح refundTime/refundTimestamp غیر-null (مستندسازی رایج
+           این پیام‌ها در بروکرهای مشابه).
+        ۲. profit دقیقاً صفر - بر اساس بررسی ۲۵۳۵ معاملهٔ واقعی از گزارش خروجی
+           خودِ Pocket Option، این حالت همیشه (بدون هیچ استثنا) دقیقاً با
+           open_price == close_price هم‌زمان بود؛ یعنی روی این حساب، ریفاند/
+           تساوی اصلاً فیلد refundTime جداگانه‌ای ندارد و تنها نشانه‌اش همین
+           profit=0 است (برخلاف WIN که همیشه مثبت و LOSS که همیشه دقیقاً
+           برابر منفیِ کل مبلغ سرمایه است - هیچ‌وقت این دو با هم قاطی نمی‌شوند).
+    بازگشتی است چون این فیلدها معمولاً روی خودِ دیکشنریِ سطح بالا نیستند، بلکه
+    داخل هر آیتم لیست تودرتوی معاملات‌اند - یک بررسی فقط-سطح‌بالا این را
+    نادیده می‌گرفت و باعث می‌شد معاملات ریفاندی به‌اشتباه WIN یا LOSS لیبل بخورند.
     """
     if isinstance(node, dict):
         lower_map = {str(k).lower(): v for k, v in node.items()}
         for key in ("refundtime", "refundtimestamp"):
             if lower_map.get(key) not in (None, 0, "", "null"):
                 return True
+        profit = lower_map.get("profit")
+        if isinstance(profit, (int, float)) and abs(profit) < 1e-9:
+            return True
         return any(_is_refund_deal(v) for v in node.values())
     if isinstance(node, list):
         return any(_is_refund_deal(item) for item in node)
@@ -145,7 +156,13 @@ def _extract_payout_percent(raw_deal: Optional[dict], result: int) -> Optional[f
     if result == 1:
         profit = lower_map.get("profit")
         amount = lower_map.get("amount")
-        if isinstance(profit, (int, float)) and isinstance(amount, (int, float)) and amount > 0:
+        # profit صفر یعنی ریفاند (نه یک برد با پی‌آوت ۰٪) - نباید این‌جا به‌عنوان
+        # پی‌آوت ۰٪ محاسبه شود، وگرنه معاملهٔ ریفاندی به‌اشتباه در آستانهٔ
+        # MIN_PAYOUT_PERCENT فعال می‌کند.
+        if (
+            isinstance(profit, (int, float)) and isinstance(amount, (int, float))
+            and amount > 0 and abs(profit) > 1e-9
+        ):
             return (profit / amount) * 100
 
     return None
