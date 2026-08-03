@@ -93,6 +93,24 @@ def _is_refund_deal(node) -> bool:
     return False
 
 
+def _resolve_deal_dict(deal: dict) -> dict:
+    """
+    اگر این دیکشنری یک لیست "deals" غیرخالی داشته باشد (فرمت successcloseOrder:
+    {"profit": X, "deals": [{...نتیجهٔ واقعی معاملهٔ مشخص...}]})، اولین آیتم
+    همان لیست برگردانده می‌شود - نه فیلد "profit" سطح بالای خودِ wrapper.
+
+    این فیلد سطح بالا همیشه با نتیجهٔ واقعیِ تک‌تک معاملات یکی نیست: در یک
+    نمونهٔ واقعیِ ریفاند/تساوی دیده شد که outer.profit=100 بود (احتمالاً مبلغ
+    برگشتی به موجودی) درحالی‌که deals[0].profit=0 بود (نتیجهٔ واقعی: نه برد نه
+    باخت). خواندن فیلد بیرونی به‌تنهایی می‌توانست این معامله را WIN غلط تفسیر
+    کند. تکیه بر داده‌های سطح دیکشنریِ داخلی همیشه درست‌تر و بدون ابهام است.
+    """
+    deals = deal.get("deals")
+    if isinstance(deals, list) and deals and isinstance(deals[0], dict):
+        return deals[0]
+    return deal
+
+
 def _interpret_deal_candidate(deal: dict) -> Optional[int]:
     """
     تلاش می‌کند از یک دیکشنری کاندیدای «نتیجهٔ معامله» یک لیبل ۰/۱ دربیاورد.
@@ -100,6 +118,8 @@ def _interpret_deal_candidate(deal: dict) -> Optional[int]:
     صریح برد/باخت، سپس کلیدهای عددی سود/زیان. اگر هیچ‌کدام قابل تفسیر نبود،
     None برمی‌گرداند (یعنی از fallback استفاده شود).
     """
+    deal = _resolve_deal_dict(deal)
+
     if _is_refund_deal(deal):
         return 0 if config.REFUND_COUNTS_AS_LOSS else 1
 
@@ -147,6 +167,7 @@ def _extract_payout_percent(raw_deal: Optional[dict], result: int) -> Optional[f
     """
     if raw_deal is None:
         return None
+    raw_deal = _resolve_deal_dict(raw_deal)
     lower_map = {str(k).lower(): v for k, v in raw_deal.items()}
 
     if "payout" in lower_map and isinstance(lower_map["payout"], (int, float)):
@@ -415,7 +436,7 @@ class DataLogger:
         # می‌دهد ثبت می‌شود - تا هم در ترمینال به‌جای WIN گمراه‌کننده، صریحاً
         # REFUND نشان داده شود، هم بعداً در تحلیل/آموزش بشود این ردیف‌ها را
         # جدا فیلتر کرد.
-        is_refund = _is_refund_deal(raw_deal) if raw_deal is not None else False
+        is_refund = _is_refund_deal(_resolve_deal_dict(raw_deal)) if raw_deal is not None else False
 
         row = dict(pending.feature_snapshot)
         # ستون‌های meta_* فقط برای ردیابی/دیباگ‌اند؛ مقدار خام قیمت دارند و
