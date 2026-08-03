@@ -242,6 +242,7 @@ async def auto_trade_task(
                   f"{skip_counts['not_near_level']} بار نزدیک هیچ سطح کلیدی‌ای نبود، "
                   f"{skip_counts['no_level_context']} بار هنوز اکسترمم/بازگشت قیمتی در کندل جاری شکل نگرفته بود، "
                   f"{skip_counts['no_candle']} بار کندل/تیک آماده نبود، "
+                  f"{skip_counts['not_ready']} بار هنوز تیک/وب‌ساکت آماده نبود، "
                   f"{skip_counts['low_confidence']} بار اطمینان مدل کمتر از آستانه بود، "
                   f"{skip_counts['blocked']} بار معاملهٔ خودکار متوقف بود، "
                   f"{skip_counts['cooldown']} بار در فاصلهٔ خنک‌شدن بعد از معاملهٔ قبلی بود.")
