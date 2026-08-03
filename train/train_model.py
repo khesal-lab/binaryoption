@@ -43,6 +43,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -62,6 +63,13 @@ from src.ml_features import (
 
 TOP_N_FEATURES = 25
 K_FOLDS = 5
+
+# فقط این منبع(ها) برای آموزش استفاده می‌شوند. هدف فعلی این است که مدل مستقیماً
+# با دادهٔ collect_data.py (استراتژی سطوح level_strategy، نمونه‌ای نسبتاً بی‌طرف
+# از رفتار بازار) ترین شود - نه با معاملات bot (که خودِ یک مدل قبلی با آستانهٔ
+# اطمینان انتخابشان کرده و ریسک حلقهٔ بازخورد دارند) یا manual (نمونهٔ خیلی کم
+# و بدون الگوی معاملاتی ثابت). برای برگشت به استفاده از همهٔ منابع، None کنید.
+TRAIN_INCLUDE_SOURCES: Optional[tuple[str, ...]] = ("level_strategy",)
 
 
 def _new_classifier() -> xgb.XGBClassifier:
@@ -152,6 +160,85 @@ def print_top_features(importances: dict[str, float], top_n: int, label: str) ->
     return [name for name, _ in sorted_importances[:top_n]]
 
 
+# ترتیب مهم است: پیشوندهای خاص‌تر (مثل chart_shape_long_) باید قبل از پیشوند
+# عمومی‌ترشان (chart_shape_) بررسی شوند وگرنه هیچ‌وقت به آن‌ها نمی‌رسد.
+_FEATURE_FAMILY_PREFIXES = [
+    ("chart_shape_long_", "chart_shape_long (شکل چارت - پنجرهٔ بلند ۲۵ کندلی)"),
+    ("chart_shape_", "chart_shape (شکل چارت - پنجرهٔ کوتاه ۱۰ کندلی)"),
+    ("micro_chart_shape_", "micro_chart_shape (شکل چارت ریز - ۵ثانیه‌ای)"),
+    ("micro_swing_", "micro_swing (نوسان ریز تیک‌ها)"),
+    ("micro_market_", "micro_market_regime (رژیم بازار ۵ثانیه‌ای)"),
+    ("level_strategy_", "level_strategy (سیگنال استراتژی سطوح)"),
+    ("candle_", "candle_structure (ساختار کندل‌های اخیر)"),
+    ("tick_velocity_", "tick_velocity (توالی سرعت تیک)"),
+    ("current_symbol_payout", "payout (پی‌آوت لحظه‌ای/رتبه در لیست)"),
+    ("hour_of_day", "time_of_day (ساعت/روز هفته)"),
+    ("day_of_week", "time_of_day (ساعت/روز هفته)"),
+]
+
+
+def _feature_family(name: str) -> str:
+    """فیچرهای جهت‌دار (DIRECTION_INTERACTION_COLUMNS) خانوادهٔ خودشان را دارند - چون print_direction_signal همین‌ها را جدا هم گزارش می‌کند."""
+    if name in DIRECTION_INTERACTION_COLUMNS:
+        return "direction_interaction (تعامل با جهت معامله)"
+    for prefix, family_label in _FEATURE_FAMILY_PREFIXES:
+        if name.startswith(prefix):
+            return family_label
+    return "other (روند/سوئینگ/حمایت-مقاومت/سایر)"
+
+
+def print_feature_family_importance(importances: dict[str, float], label: str) -> None:
+    """
+    مجموع اهمیت فیچرها به تفکیک «خانواده» (مثلاً همهٔ ۴۰+ ستون chart_shape_long_*
+    با هم). یک لیست تخت از ۲۵ نام فیچر تک‌تک (اکثراً پیکسل‌های شکل چارت که به‌تنهایی
+    قابل‌تفسیر نیستند) نمی‌گوید کدام دسته از اطلاعات واقعاً برای مدل مهم است؛ این
+    خلاصه دقیقاً همان را نشان می‌دهد - برای تصمیم‌گیری دربارهٔ این‌که کدام خانواده
+    را باید بیشتر توسعه داد یا کدام را می‌شود حذف کرد.
+    """
+    family_totals: dict[str, float] = {}
+    for feature_name, importance in importances.items():
+        family_totals[_feature_family(feature_name)] = family_totals.get(_feature_family(feature_name), 0.0) + importance
+    print(f"\n--- اهمیت به تفکیک خانوادهٔ فیچر {label} ---")
+    for family_label, total in sorted(family_totals.items(), key=lambda kv: kv[1], reverse=True):
+        print(f"  {family_label:<55} {total:.4f}")
+
+
+def print_result_source_sanity_check(df: pd.DataFrame) -> None:
+    """
+    بررسی سلامت لیبل‌گذاری: نتیجهٔ گزارش‌شدهٔ خودِ پلتفرم (ws_deal) را با محاسبهٔ
+    داخلیِ مستقل از تیک‌های خودمان (tick_fallback_result) مقایسه می‌کند. این دو
+    منبع معمولاً باید تقریباً همیشه هم‌رأی باشند؛ اختلاف زیاد (به‌خصوص وقتی
+    ws_deal=WIN ولی tick_fallback=LOSS) نشانهٔ احتمالی یک باگ در تفسیر پیام‌های
+    WebSocket است - دقیقاً شبیه باگ successopenOrder/successcloseOrder که قبلاً
+    پیدا و رفع شد (پیام «باز شدن معامله» با سود پیش‌بینی‌شدهٔ همیشه-مثبت، به‌جای
+    نتیجهٔ واقعیِ بسته‌شدن معامله اشتباه گرفته می‌شد). این بررسی برای این است که
+    اگر مشکل مشابهی دوباره پیش بیاید، همین‌جا زود دیده شود - نه بعد از هفته‌ها
+    ترین روی دادهٔ آلوده.
+    """
+    if "result_source" not in df.columns or "tick_fallback_result" not in df.columns:
+        return
+    ws_deal_rows = df[df["result_source"] == "ws_deal"].dropna(subset=["tick_fallback_result"])
+    if len(ws_deal_rows) == 0:
+        return
+
+    result_int = ws_deal_rows["result"].astype(int)
+    tick_int = ws_deal_rows["tick_fallback_result"].astype(int)
+    disagreement = result_int != tick_int
+    disagreement_rate = float(disagreement.mean())
+
+    print("\n--- بررسی سلامت لیبل (ws_deal در برابر tick_fallback) ---")
+    print(f"  {len(ws_deal_rows)} معامله نتیجه‌شان از خودِ پلتفرم (ws_deal) گرفته شده.")
+    print(f"  اختلاف با محاسبهٔ داخلی (tick_fallback): {int(disagreement.sum())} مورد ({disagreement_rate:.1%})")
+    if disagreement.sum() > 0:
+        ws_win_tick_loss = int(((result_int == 1) & (tick_int == 0)).sum())
+        ws_loss_tick_win = int(((result_int == 0) & (tick_int == 1)).sum())
+        print(f"    - ws_deal=WIN ولی tick_fallback=LOSS: {ws_win_tick_loss} مورد")
+        print(f"    - ws_deal=LOSS ولی tick_fallback=WIN: {ws_loss_tick_win} مورد")
+        if disagreement_rate > 0.05:
+            print("  ⚠️ نرخ اختلاف بالاست - احتمال یک باگ در تفسیر پیام نتیجهٔ معامله وجود دارد؛ "
+                  "بررسی کنید (شبیه باگ successopenOrder/successcloseOrder که قبلاً پیدا شد).")
+
+
 def main() -> None:
     print("Loading data from database...")
     conn = sqlite3.connect(config.SQLITE_DB_PATH)
@@ -160,7 +247,43 @@ def main() -> None:
 
     print(f"Total trades loaded: {len(df)}")
 
+    # معاملات ریفاندی نه برد واقعی‌اند نه باخت واقعی (اصل مبلغ برگشته) - وارد
+    # کردنشان با یک لیبل دوتایی اجباری فقط نویز اضافه می‌کند. قبل از هر چیز
+    # دیگری از دادهٔ آموزشی کنار گذاشته می‌شوند.
+    if "meta_is_refund" in df.columns:
+        refund_mask = df["meta_is_refund"].fillna(False).astype(bool)
+        if refund_mask.any():
+            print(f"{int(refund_mask.sum())} معاملهٔ ریفاندی (نه برد نه باخت واقعی) از دادهٔ آموزشی حذف شد.")
+            df = df[~refund_mask]
+
     df = df.dropna(subset=["result"])
+
+    # بررسی سلامت لیبل - قبل از هر فیلتر دیگری، روی کل دادهٔ باقی‌مانده.
+    print_result_source_sanity_check(df)
+
+    # --- توزیع منبع معاملات (دستی / level_strategy / bot) ----------------------
+    # معاملات bot را خودِ یک مدل قبلی (با آستانهٔ اطمینان) انتخاب کرده، نه یک
+    # نمونهٔ بی‌طرف از بازار - پس می‌توانند باعث شوند مدل جدید صرفاً باور مدل
+    # قبلی را در خودش تقویت کند (Selection Bias / حلقهٔ بازخورد)، نه یک الگوی
+    # مستقل و جدید یاد بگیرد. این‌جا سهم هر منبع همیشه قابل‌مشاهده می‌ماند،
+    # حتی وقتی TRAIN_INCLUDE_SOURCES فقط بخشی از آن‌ها را برای آموزش انتخاب می‌کند.
+    source_series_all = (
+        df["meta_trade_source"].fillna("manual") if "meta_trade_source" in df.columns
+        else pd.Series("manual", index=df.index)
+    )
+    print("\n--- توزیع منبع معاملات (دستی/level_strategy/bot) ---")
+    for source, count in source_series_all.value_counts().items():
+        source_winrate = df.loc[source_series_all == source, "result"].astype(int).mean()
+        print(f"  {source}: {count} معامله، وین‌ریت {source_winrate:.1%}")
+
+    if TRAIN_INCLUDE_SOURCES is not None:
+        include_mask = source_series_all.isin(TRAIN_INCLUDE_SOURCES)
+        excluded_count = len(df) - int(include_mask.sum())
+        if excluded_count > 0:
+            print(f"فقط منبع(های) {TRAIN_INCLUDE_SOURCES} برای آموزش استفاده می‌شود "
+                  f"({excluded_count} معامله از منابع دیگر کنار گذاشته شد - train/train_model.py:TRAIN_INCLUDE_SOURCES).")
+        df = df[include_mask]
+
     y_all = df["result"].astype(int)
 
     # تشخیص زودهنگام دو مشکل رایج قبل از آموزش: تعداد نمونهٔ خیلی کم برای یکی
@@ -180,20 +303,6 @@ def main() -> None:
               f"({min_direction_count} از {len(df)}). مدل احتمالاً نمی‌تواند برای آن جهت "
               f"سیگنال معتبری یاد بگیرد - سعی کنید معاملات هر دو جهت را متعادل‌تر جمع‌آوری کنید.")
 
-    # --- توزیع منبع معاملات (دستی / level_strategy / bot) ---------------------
-    # معاملات bot را خودِ یک مدل قبلی (با آستانهٔ اطمینان) انتخاب کرده، نه یک
-    # نمونهٔ بی‌طرف از بازار - پس می‌توانند باعث شوند مدل جدید صرفاً باور مدل
-    # قبلی را در خودش تقویت کند (Selection Bias / حلقهٔ بازخورد)، نه یک الگوی
-    # مستقل و جدید یاد بگیرد. این‌جا سهم هر منبع را همیشه قابل‌مشاهده می‌کنیم.
-    source_series = (
-        df["meta_trade_source"].fillna("manual") if "meta_trade_source" in df.columns
-        else pd.Series("manual", index=df.index)
-    )
-    print("\n--- توزیع منبع معاملات (دستی/level_strategy/bot) ---")
-    for source, count in source_series.value_counts().items():
-        source_winrate = y_all[source_series == source].mean()
-        print(f"  {source}: {count} معامله، وین‌ریت {source_winrate:.1%}")
-
     records = df.drop(columns=["result"]).to_dict(orient="records")
     flattened_rows = [flatten_snapshot_for_model(row) for row in records]
 
@@ -210,6 +319,7 @@ def main() -> None:
     full_model, full_test_accuracy = train_final_model(X, y, label="(کامل - همهٔ فیچرها)")
     full_importances = print_direction_signal(X, full_model, label="(کامل)")
     top_feature_names = print_top_features(full_importances, TOP_N_FEATURES, label="(کامل)")
+    print_feature_family_importance(full_importances, label="(کامل)")
 
     # سه دسته فیچر صرف‌نظر از رتبهٔ اهمیتشان به مدل مقایسه‌ای اضافه می‌شوند:
     #   ۱. فیچرهای جهت‌دار (direction_call و تعامل‌هایش) - چون توانایی تفکیک
@@ -236,41 +346,8 @@ def main() -> None:
     print(f"\nModel saved to {config.MODEL_JSON_PATH}")
     print(f"Feature list saved to {config.MODEL_FEATURES_PATH}")
 
-    # =========================================================================
-    # آزمایش تشخیصی: مدل کامل بدون معاملات bot
-    # هدف: معاملات bot را خودِ یک مدل قبلی (با آستانهٔ اطمینان) انتخاب کرده،
-    # نه یک نمونهٔ بی‌طرف از بازار - پس ممکن است دقتِ بالای مدل کامل (نسبت به
-    # baseline خام) صرفاً بازتاب/تقویتِ باور همان مدل قبلی باشد، نه یک الگوی
-    # مستقل و جدید بازار. این مدل فقط برای مقایسه چاپ می‌شود؛ ذخیره یا در
-    # معاملهٔ زنده استفاده نمی‌شود.
-    # =========================================================================
-    non_bot_mask = source_series.values != "bot"
     baseline_winrate = float(y.mean())
-    print(f"\n\nوین‌ریت خام کل داده (baseline - فرض «همیشه برنده است»): {baseline_winrate * 100:.2f}%")
-
-    if 0 < non_bot_mask.sum() < len(y) and non_bot_mask.sum() >= 50:
-        print("\n==========================================================")
-        print(f"آزمایش تشخیصی: مدل کامل بدون معاملات bot ({int(non_bot_mask.sum())} از {len(y)} ردیف)")
-        print("==========================================================")
-        X_non_bot = X[non_bot_mask]
-        y_non_bot = y[non_bot_mask]
-        non_bot_baseline = float(y_non_bot.mean())
-        print(f"وین‌ریت خام دادهٔ بدون bot: {non_bot_baseline * 100:.2f}%")
-
-        non_bot_kfold_mean, non_bot_kfold_std = run_kfold_cv(
-            X_non_bot, y_non_bot, label="(کامل - بدون bot)"
-        )
-        gap = (non_bot_kfold_mean - full_kfold_mean) * 100
-        print(f"\nمقایسه با مدل کامل (با همهٔ منابع، {full_kfold_mean * 100:.2f}%): {gap:+.2f} واحد درصد")
-        if gap < -1.0:
-            print("⚠️  دقت مدل بدون معاملات bot به‌طور محسوسی پایین‌تر است - یعنی بخشی از دقت "
-                  "دیده‌شده در مدل کامل ممکن است ناشی از حلقهٔ بازخورد با یک مدل قبلی باشد، نه "
-                  "یک الگوی مستقل و جدید بازار. برای اطمینان، فعلاً دادهٔ بیشتری با collect_data.py "
-                  "(یا معاملهٔ دستی) جمع کنید تا سهم bot در دیتاست کم‌رنگ‌تر شود.")
-        else:
-            print("تفاوت محسوس منفی دیده نمی‌شود - دقت مدل کامل به دادهٔ bot وابسته به‌نظر نمی‌رسد.")
-    else:
-        print("\n(داده‌ای برای آزمایش «بدون bot» کافی نیست یا اصلاً معاملهٔ bot ثبت نشده.)")
+    print(f"\n\nوین‌ریت خام دادهٔ آموزشی (baseline - فرض «همیشه برنده است»): {baseline_winrate * 100:.2f}%")
 
     # =========================================================================
     # مدل مقایسه‌ای: TOP_N_FEATURES فیچر مهم‌تر + فیچرهای اجباری (جهت‌دار/
@@ -287,7 +364,8 @@ def main() -> None:
 
     top_kfold_mean, top_kfold_std = run_kfold_cv(X_top, y, label=top_label)
     top_model, top_test_accuracy = train_final_model(X_top, y, label=top_label)
-    print_direction_signal(X_top, top_model, label=top_label)
+    top_importances = print_direction_signal(X_top, top_model, label=top_label)
+    print_feature_family_importance(top_importances, label=top_label)
 
     top_model.save_model(str(config.MODEL_TOP_FEATURES_JSON_PATH))
     with open(config.MODEL_TOP_FEATURES_LIST_PATH, "w", encoding="utf-8") as f:

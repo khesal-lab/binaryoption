@@ -61,16 +61,24 @@ class PendingTrade:
     source: str = "manual"  # "manual" (کلیک کاربر) یا "bot" (کلیک خودکار مدل)
 
 
-def _is_refund_deal(lower_map: dict) -> bool:
+def _is_refund_deal(node) -> bool:
     """
-    آیا این پیام «نتیجهٔ معامله» نشان می‌دهد پلتفرم خودش مبلغ را ریفاند کرده
-    (نه برد نه باخت واقعی - مثلاً به‌خاطر مشکل سرور یا تساوی قیمت)؟ خودِ
-    Pocket Option این را با فیلدهای refundTime/refundTimestamp غیر-null در
-    پیام نتیجهٔ معامله (updateClosedDeals) نشان می‌دهد.
+    آیا این پیام «نتیجهٔ معامله» (یا هرکدام از دیکشنری‌های تودرتوی آن، مثل
+    لیست "deals" در successcloseOrder) نشان می‌دهد پلتفرم خودش مبلغ را ریفاند
+    کرده (نه برد نه باخت واقعی - مثلاً به‌خاطر مشکل سرور یا تساوی قیمت)؟ خودِ
+    Pocket Option این را با فیلدهای refundTime/refundTimestamp غیر-null نشان
+    می‌دهد. بازگشتی است چون این فیلدها معمولاً روی خودِ دیکشنریِ سطح بالا
+    نیستند، بلکه داخل هر آیتم لیست تودرتوی معاملات‌اند - یک بررسی فقط-سطح‌بالا
+    این را نادیده می‌گرفت و باعث می‌شد معاملات ریفاندی به‌اشتباه WIN لیبل بخورند.
     """
-    for key in ("refundtime", "refundtimestamp"):
-        if lower_map.get(key) not in (None, 0, "", "null"):
-            return True
+    if isinstance(node, dict):
+        lower_map = {str(k).lower(): v for k, v in node.items()}
+        for key in ("refundtime", "refundtimestamp"):
+            if lower_map.get(key) not in (None, 0, "", "null"):
+                return True
+        return any(_is_refund_deal(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_is_refund_deal(item) for item in node)
     return False
 
 
@@ -81,10 +89,10 @@ def _interpret_deal_candidate(deal: dict) -> Optional[int]:
     صریح برد/باخت، سپس کلیدهای عددی سود/زیان. اگر هیچ‌کدام قابل تفسیر نبود،
     None برمی‌گرداند (یعنی از fallback استفاده شود).
     """
-    lower_map = {str(k).lower(): v for k, v in deal.items()}
-
-    if _is_refund_deal(lower_map):
+    if _is_refund_deal(deal):
         return 0 if config.REFUND_COUNTS_AS_LOSS else 1
+
+    lower_map = {str(k).lower(): v for k, v in deal.items()}
 
     for key in ("iswin", "is_win", "win"):
         if key in lower_map:
@@ -318,9 +326,11 @@ class DataLogger:
             source=source,
         )
 
-        source_tag = f" [{source}]" if source != "manual" else ""
-        print(f"[DataLogger] معامله{source_tag} {direction} ثبت شد. "
-              f"در حال انتظار برای نتیجه ({self.expiry_seconds} ثانیه)...")
+        # برای source="bot"، خودِ main.py همین لحظه با جزئیات بیشتر (اطمینان مدل)
+        # این معامله را اعلام کرده - چاپ دوباره همین‌جا فقط تکرار بی‌فایده است.
+        if source != "bot":
+            source_tag = f" [{source}]" if source != "manual" else ""
+            print(f"[DataLogger] معامله{source_tag} {direction} ثبت شد.")
 
         asyncio.create_task(self._evaluate_and_log(pending))
 
@@ -368,6 +378,12 @@ class DataLogger:
             self.on_result_callback(pending.source, result)
 
         payout_percent = _extract_payout_percent(raw_deal, result)
+        # آیا خودِ پلتفرم این معامله را ریفاند کرده (نه برد نه باخت واقعی)؟ این
+        # مستقل از این‌که config.REFUND_COUNTS_AS_LOSS چه لیبل عددی‌ای به آن
+        # می‌دهد ثبت می‌شود - تا هم در ترمینال به‌جای WIN گمراه‌کننده، صریحاً
+        # REFUND نشان داده شود، هم بعداً در تحلیل/آموزش بشود این ردیف‌ها را
+        # جدا فیلتر کرد.
+        is_refund = _is_refund_deal(raw_deal) if raw_deal is not None else False
 
         row = dict(pending.feature_snapshot)
         # ستون‌های meta_* فقط برای ردیابی/دیباگ‌اند؛ مقدار خام قیمت دارند و
@@ -379,6 +395,7 @@ class DataLogger:
         row["meta_exit_timestamp"] = exit_timestamp
         row["meta_raw_deal_json"] = json.dumps(raw_deal) if raw_deal is not None else None
         row["meta_payout_percent"] = payout_percent
+        row["meta_is_refund"] = is_refund
         # تنها ویژگی نسبی مشتق از ورود/خروج (قابل استفاده در تحلیل، نه لزوماً در مدل):
         row["price_change_pct"] = (
             (exit_price - pending.entry_price) / pending.entry_price if pending.entry_price else None
@@ -407,19 +424,22 @@ class DataLogger:
                 # یک معاملهٔ واقعاً با پی‌آوت خوب، هر زنجیرهٔ قبلیِ خوانش‌های کم را باطل می‌کند.
                 self._low_payout_streak = 0
 
-        outcome_text = "WIN ✅" if result == 1 else "LOSS ❌"
+        outcome_text = "REFUND ↩️" if is_refund else ("WIN ✅" if result == 1 else "LOSS ❌")
+        # فقط تا رسیدن به نمونهٔ اولیهٔ پیشنهادی نمایش داده می‌شود - بعد از آن
+        # دیگر اطلاعات کاربردی‌ای اضافه نمی‌کند و فقط هر خط را طولانی‌تر می‌کند.
         lifetime_total = self._lifetime_trade_count()
         target = config.MIN_TRADES_FOR_INITIAL_TRAINING
-        progress = f" | مجموع کل معاملات ثبت‌شده: {lifetime_total}"
-        if target:
-            progress += f" از حدود {target} (نمونهٔ اولیهٔ پیشنهادی) — {min(100, lifetime_total / target * 100):.0f}٪"
+        progress = (
+            f" | {lifetime_total}/{target} ({min(100, lifetime_total / target * 100):.0f}٪)"
+            if target and lifetime_total < target else ""
+        )
         source_tag = f" [{pending.source}]" if pending.source != "manual" else ""
+        bot_winrate_text = (
+            f" | وین‌ریت {pending.source}: {self.bot_trade_history.get_overall_winrate():.1%}"
+            if pending.source != "manual" else ""
+        )
         print(f"[DataLogger] نتیجهٔ معامله{source_tag}: {outcome_text} (منبع: {result_source}) | "
-              f"وین‌ریت کلی از شروع اجرا: {self.trade_history.get_overall_winrate():.2%}{progress}")
-        if pending.source != "manual":
-            print(f"[DataLogger] وین‌ریت کلیِ ربات ({pending.source}) از شروع اجرا: "
-                  f"{self.bot_trade_history.get_overall_winrate():.2%} "
-                  f"روی {self.bot_trade_history.total_trades()} معاملهٔ خودکار")
+              f"وین‌ریت کلی: {self.trade_history.get_overall_winrate():.1%}{bot_winrate_text}{progress}")
 
     async def _show_low_payout_banner(self, payout_percent: float) -> None:
         """
