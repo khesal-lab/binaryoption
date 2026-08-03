@@ -374,15 +374,37 @@ def main() -> None:
     print(f"Feature list saved to {config.MODEL_TOP_FEATURES_LIST_PATH}")
 
     # =========================================================================
-    # مقایسهٔ نهایی
+    # مقایسهٔ نهایی: baseline خام (وین‌ریت واقعی level_strategy روی همین داده)
+    # در برابر مدل کامل در برابر مدل فقط-فیچر-برتر. این دقیقاً پاسخ به سؤال
+    # «آیا مدل یادگیری‌شده واقعاً از قانون سادهٔ level_strategy بهتر است؟» است -
+    # نه فقط دقت خام مدل، بلکه مقایسه‌اش با همان چیزی که collect_data.py
+    # بدون هیچ مدلی به‌دست می‌آورد.
     # =========================================================================
-    print("\n\n--- مقایسهٔ مدل کامل در برابر مدل با فقط فیچرهای برتر ---")
+    print("\n\n--- مقایسهٔ نهایی: baseline خام (level_strategy) / مدل کامل / مدل فقط-فیچر-برتر ---")
+    print(f"وین‌ریت خام level_strategy روی همین داده (baseline، بدون هیچ مدلی): {baseline_winrate * 100:.2f}%")
     print(f"مدل کامل ({len(X.columns)} فیچر):")
     print(f"  K-Fold: {full_kfold_mean*100:.2f}% ± {full_kfold_std*100:.2f}%   |   "
           f"دقت روی تست: {full_test_accuracy*100:.2f}%")
     print(f"مدل مقایسه‌ای {top_label}:")
     print(f"  K-Fold: {top_kfold_mean*100:.2f}% ± {top_kfold_std*100:.2f}%   |   "
           f"دقت روی تست: {top_test_accuracy*100:.2f}%")
+
+    def _compare_to_baseline(model_name: str, kfold_mean: float) -> None:
+        gap = (kfold_mean - baseline_winrate) * 100
+        if gap > 1.0:
+            print(f"  ✅ {model_name} حدود {gap:.2f} واحد درصد از baseline خام (level_strategy) بهتر است - "
+                  "یعنی مدل واقعاً سیگنالی فراتر از قانون سادهٔ level_strategy یاد گرفته.")
+        elif gap < -1.0:
+            print(f"  ⚠️ {model_name} حدود {abs(gap):.2f} واحد درصد از baseline خام (level_strategy) "
+                  "پایین‌تر است - یعنی فعلاً چیزی بهتر از خودِ قانون ساده یاد نگرفته؛ اعتماد به این "
+                  "مدل به‌جای level_strategy در معاملهٔ زنده می‌تواند حتی نتیجه را بدتر کند.")
+        else:
+            print(f"  ~ {model_name} عملاً تفاوت محسوسی با baseline خام (level_strategy) ندارد.")
+
+    print()
+    _compare_to_baseline("مدل کامل", full_kfold_mean)
+    _compare_to_baseline("مدل فقط-فیچر-برتر", top_kfold_mean)
+
     diff = (top_kfold_mean - full_kfold_mean) * 100
     if abs(diff) < 1.0:
         print(f"\nتفاوت دقت K-Fold بین دو مدل ناچیز است ({diff:+.2f} واحد درصد) - یعنی بقیهٔ "
