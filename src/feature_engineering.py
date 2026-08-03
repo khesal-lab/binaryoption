@@ -580,6 +580,52 @@ def normalized_window_shape(
     ]
 
 
+def compute_micro_market_regime(
+    candles: "deque[Candle]", window: int, current_candle: Optional[Candle] = None
+) -> dict:
+    """
+    وضعیت بازار (گاوی/خرسی/رنج) در تایم‌فریم کندل‌های ریز (پیش‌فرض ۵ ثانیه‌ای)،
+    بر اساس Efficiency Ratio کافمن: نسبت «جابجایی خالص قیمت» به «مجموع جابجایی‌های
+    مرحله‌ای (close به close) بین کندل‌های همان پنجره». این نسبت نزدیک ۱ یعنی
+    حرکت یک‌طرفهٔ تمیز (روند واقعی)، نزدیک ۰ یعنی رفت‌وبرگشت بدون جابجایی خالص
+    (رنج) - حتی اگر قیمت در همان بازه پرنوسان هم بوده باشد. برخلاف trend_regime
+    در market_structure.py (که به سوئینگ‌های های/لوی کندل‌های ۱-دقیقه‌ای نیاز
+    دارد و برای پنجرهٔ کوتاه چند-ده‌ثانیه‌ای داده کافی ندارد)، این روش با همین
+    تعداد کم کندل هم قابل‌محاسبه است.
+    """
+    closed = list(candles)[-window:]
+    sequence = closed + ([current_candle] if current_candle else [])
+
+    if len(sequence) < 2:
+        return {
+            "micro_market_efficiency_ratio": None,
+            "micro_market_net_direction": None,
+            "micro_market_bullish_ratio": None,
+            "micro_market_regime": 0,
+            "micro_market_regime_ready": 0,
+        }
+
+    net_change = sequence[-1].close - sequence[0].open
+    step_changes = [abs(sequence[i].close - sequence[i - 1].close) for i in range(1, len(sequence))]
+    total_path = sum(step_changes)
+    efficiency_ratio = (abs(net_change) / total_path) if total_path > 0 else 0.0
+    net_direction = 1 if net_change > 0 else (-1 if net_change < 0 else 0)
+    bullish_ratio = sum(1 for c in sequence if c.is_bullish) / len(sequence)
+
+    if net_direction != 0 and efficiency_ratio >= config.MICRO_TREND_EFFICIENCY_THRESHOLD:
+        regime = net_direction  # +۱ = گاوی (Bullish)، -۱ = خرسی (Bearish)
+    else:
+        regime = 0  # رنج
+
+    return {
+        "micro_market_efficiency_ratio": efficiency_ratio,
+        "micro_market_net_direction": net_direction,
+        "micro_market_bullish_ratio": bullish_ratio,
+        "micro_market_regime": regime,
+        "micro_market_regime_ready": 1,
+    }
+
+
 # ---------------------------------------------------------------------------
 # منطق بدون‌حالت (Stateless) استراتژی سطوح (src/level_strategy.py) - این‌جا
 # نگه‌داری می‌شود (نه در خودِ level_strategy.py) تا هم آن ماژول بتواند از این
@@ -873,6 +919,20 @@ def build_feature_snapshot(
                 micro_candle_aggregator.current,
             )
         )
+        # وضعیت بازار (گاوی/خرسی/رنج) در همین تایم‌فریم ریز - جدا از شکل چارت بالا:
+        snapshot.update(
+            compute_micro_market_regime(
+                micro_candle_aggregator.history,
+                config.MICRO_CHART_WINDOW_CANDLES,
+                micro_candle_aggregator.current,
+            )
+        )
+    else:
+        snapshot["micro_market_efficiency_ratio"] = None
+        snapshot["micro_market_net_direction"] = None
+        snapshot["micro_market_bullish_ratio"] = None
+        snapshot["micro_market_regime"] = None
+        snapshot["micro_market_regime_ready"] = None
 
     # «نظر» استراتژی سطوح (level_strategy.py) در همین لحظه - نه به‌عنوان یک
     # قانون سخت‌کدشده، بلکه به‌صورت فیچرهای نسبی تا خودِ مدل یاد بگیرد کِی به

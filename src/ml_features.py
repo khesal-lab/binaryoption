@@ -79,6 +79,7 @@ DIRECTION_INTERACTION_COLUMNS = frozenset({
     "level_strategy_region_aligned_with_direction",
     "level_strategy_near_high_signal_aligned_with_direction",
     "level_strategy_near_low_signal_aligned_with_direction",
+    "micro_market_regime_aligned_with_direction",
 })
 
 # فیچرهای «نوسان ریز» (Micro-Swing): یک خانوادهٔ به‌هم‌مرتبط از فیچرها (نه
@@ -214,6 +215,10 @@ def _add_direction_interaction_features(row: dict) -> None:
     row["level_strategy_near_low_signal_aligned_with_direction"] = (
         sign * _num("level_strategy_near_low_implied_direction")
     )
+
+    # هم‌جهتی معاملهٔ انتخابی با رژیم بازار در تایم‌فریم ریز (۵ ثانیه‌ای):
+    # مثبت=هم‌جهت با گاوی/خرسی بودنِ همان چند ثانیهٔ اخیر، منفی=مخالف، صفر=رنج/بدون داده.
+    row["micro_market_regime_aligned_with_direction"] = sign * _num("micro_market_regime")
 
     # برای CALL، «هدف» صعود قیمت است (مقاومت مانع، حمایت پشتیبان)؛ برای PUT
     # برعکس. این دو فیچر می‌گویند «در جهتی که رفته‌ام چقدر راه باز است» و
