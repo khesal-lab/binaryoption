@@ -216,6 +216,17 @@ async def auto_trade_task(
     """
     poll_interval = 0.2
     last_trade_monotonic = 0.0
+    diagnostics_interval_seconds = 30.0
+    last_diagnostics_print = time.monotonic()
+    # چون از این به بعد اکثر دورها به‌خاطر gating جدید (فقط نزدیک سطوح کلیدی
+    # level_strategy) رد می‌شوند، بدون این شمارنده‌ها هیچ سرنخی از این نیست که
+    # آیا اصلاً چیزی در حال بررسی هست یا مثلاً هنوز تیک کافی نرسیده - هر
+    # چند ثانیه یک‌بار خلاصهٔ همین دلایل رد شدن چاپ می‌شود.
+    skip_counts = {
+        "blocked": 0, "cooldown": 0, "not_ready": 0, "no_candle": 0,
+        "no_level_context": 0, "not_near_level": 0, "low_confidence": 0,
+    }
+    gate_pass_count = 0
 
     print(f"[AutoTrade] حالت معاملهٔ خودکار فعال شد | آستانهٔ اطمینان: "
           f"{config.AUTO_TRADE_CONFIDENCE_THRESHOLD:.0%} | فاصلهٔ حداقلی بین معاملات: "
@@ -224,23 +235,42 @@ async def auto_trade_task(
     while not stop_event.is_set():
         await asyncio.sleep(poll_interval)
 
+        now = time.monotonic()
+        if now - last_diagnostics_print >= diagnostics_interval_seconds:
+            print(f"[AutoTrade] گزارش {diagnostics_interval_seconds:.0f} ثانیهٔ اخیر: "
+                  f"{gate_pass_count} بار وارد بررسیِ مدل شد، "
+                  f"{skip_counts['not_near_level']} بار نزدیک هیچ سطح کلیدی‌ای نبود، "
+                  f"{skip_counts['no_level_context']} بار هنوز اکسترمم/بازگشت قیمتی در کندل جاری شکل نگرفته بود، "
+                  f"{skip_counts['no_candle']} بار کندل/تیک آماده نبود، "
+                  f"{skip_counts['low_confidence']} بار اطمینان مدل کمتر از آستانه بود، "
+                  f"{skip_counts['blocked']} بار معاملهٔ خودکار متوقف بود، "
+                  f"{skip_counts['cooldown']} بار در فاصلهٔ خنک‌شدن بعد از معاملهٔ قبلی بود.")
+            for key in skip_counts:
+                skip_counts[key] = 0
+            gate_pass_count = 0
+            last_diagnostics_print = now
+
         if data_logger.is_bot_trading_blocked():
+            skip_counts["blocked"] += 1
             continue
 
-        now = time.monotonic()
         if now - last_trade_monotonic < config.AUTO_TRADE_COOLDOWN_SECONDS:
+            skip_counts["cooldown"] += 1
             continue
 
         latest = tick_buffer.latest()
         if latest is None or not tick_buffer.is_ready():
+            skip_counts["not_ready"] += 1
             continue
 
         current_candle = candle_aggregator.current
         if current_candle is None or current_candle.range <= 0:
+            skip_counts["no_candle"] += 1
             continue
 
         level_context = compute_level_strategy_context(tick_history, current_candle)
         if level_context is None:
+            skip_counts["no_level_context"] += 1
             continue
 
         # آیا قیمت لحظه‌ای همین الان نزدیک یکی از همان سطوح کلیدی (نزدیک سقف/کف
@@ -251,8 +281,10 @@ async def auto_trade_task(
         near_low_gap = abs(price_position - level_context["level_strategy_near_low_position"])
         if (near_high_gap > config.LEVEL_STRATEGY_MATCH_TOLERANCE_RATIO
                 and near_low_gap > config.LEVEL_STRATEGY_MATCH_TOLERANCE_RATIO):
+            skip_counts["not_near_level"] += 1
             continue
 
+        gate_pass_count += 1
         snapshot = build_feature_snapshot(tick_buffer, tick_history, candle_aggregator, micro_candle_aggregator)
         snapshot.update(
             market_structure.get_features(latest.price, latest.timestamp, candle_aggregator.current)
@@ -261,6 +293,7 @@ async def auto_trade_task(
 
         direction, confidence = predictor.predict_direction(snapshot)
         if direction is None or confidence < config.AUTO_TRADE_CONFIDENCE_THRESHOLD:
+            skip_counts["low_confidence"] += 1
             continue
 
         click_source_holder["source"] = "bot"
