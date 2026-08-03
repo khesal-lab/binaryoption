@@ -45,6 +45,7 @@ _EXCLUDED_COLUMNS = {
     "meta_raw_deal_json",
     "meta_trade_source",
     "meta_payout_percent",  # فقط بعد از پایان معامله معلوم می‌شود - نشت اطلاعات
+    "meta_is_refund",  # متادیتا برای فیلتر کردن معاملات ریفاندی، نه ورودی مدل
     "result_source",
     "tick_fallback_result",
     "price_change_pct",  # فقط بعد از پایان معامله معلوم می‌شود - نشت اطلاعات

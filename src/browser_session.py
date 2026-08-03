@@ -74,6 +74,33 @@ def _strip_socketio_prefix(raw: str) -> Optional[object]:
         return None
 
 
+# پیام‌های «رویداد باینری» socket.io (وقتی سرور یک Attachment جدا می‌فرستد) به شکل
+# «کد عددی» + «-» + JSON هستند، مثل:
+#   451-["successcloseOrder",{"_placeholder":true,"num":0}]
+# و بدنهٔ واقعی پیام (Attachment) در یک فریم جداگانهٔ بعدی می‌رسد. چون این فریم دوم
+# هیچ نامی از رویداد ندارد، بدون ردیابی این نام از فریم اول، غیرممکن است بشود
+# successopenOrder (که فقط پیش‌بینی خوش‌بینانهٔ سود در لحظهٔ باز شدن معامله است،
+# همیشه مثبت) را از successcloseOrder (نتیجهٔ واقعیِ بسته‌شدن معامله) تشخیص داد.
+_SOCKET_IO_BINARY_EVENT_RE = re.compile(r"^\d+-")
+
+
+def _extract_binary_event_name(raw: str) -> Optional[str]:
+    """
+    اگر raw یک فریمِ «اعلام رویداد باینری» باشد، نام رویداد را برمی‌گرداند؛
+    وگرنه None (یعنی این فریم یا یک پیام معمولی است، یا خودِ بدنهٔ یک Attachment).
+    """
+    match = _SOCKET_IO_BINARY_EVENT_RE.match(raw)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(raw[match.end():])
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if isinstance(parsed, list) and parsed and isinstance(parsed[0], str):
+        return parsed[0]
+    return None
+
+
 # کف قابل‌قبول برای timestamp (تقریباً سال ۲۰۰۱ به بعد، به ثانیه). پیام‌های دیگری مثل
 # successsignals/stats شکل [symbol, seconds, count] دارند (مثل ["AUDCHF_otc", 180, 293])
 # که بدون این حد پایین، دقیقاً شبیه یک ردیف تیک واقعی تشخیص داده می‌شدند و به‌عنوان
@@ -295,6 +322,10 @@ class WebSocketListener:
         self.asset_payout_tracker = asset_payout_tracker
         self._active_sockets: set[WebSocket] = set()
         self.connected_event = asyncio.Event()
+        # نام رویداد باینری اعلام‌شده در فریمِ قبلی (اگر بود) - چون بدنهٔ واقعیِ
+        # آن رویداد در فریم بعدی، جدا و بدون نام می‌رسد. به محض مصرف در همان
+        # فریمِ بعدی، دوباره None می‌شود (نگاه کنید به _extract_binary_event_name).
+        self._pending_binary_event_name: Optional[str] = None
 
     def attach(self, page: Page) -> None:
         """این متد باید بعد از باز شدن صفحه صدا زده شود تا شنود شروع شود."""
@@ -320,6 +351,18 @@ class WebSocketListener:
         raw_str = raw_payload if isinstance(raw_payload, str) else raw_payload.decode("utf-8", errors="ignore")
         _log_raw_frame(raw_str)
 
+        # اگر این فریم فقط «اعلام یک رویداد باینری» باشد (بدنهٔ واقعی در فریم
+        # بعدی می‌رسد)، نام رویداد را برای فریم بعدی نگه می‌داریم و همین‌جا تمام.
+        binary_event_name = _extract_binary_event_name(raw_str)
+        if binary_event_name is not None:
+            self._pending_binary_event_name = binary_event_name
+            return
+
+        # این فریم، بدنهٔ واقعیِ همان رویداد باینریِ قبلی است (اگر بود) - یک‌بار
+        # مصرف می‌شود تا به فریم‌های نامرتبط بعدی نشت نکند.
+        associated_event_name = self._pending_binary_event_name
+        self._pending_binary_event_name = None
+
         payload = _strip_socketio_prefix(raw_str)
         if payload is None:
             return
@@ -337,7 +380,20 @@ class WebSocketListener:
                     pass
                 self.tick_queue.put_nowait(tick)
 
-        if self.deal_buffer is not None:
+        # نکتهٔ حیاتی: پیام «باز شدن معامله» (successopenOrder) هم دقیقاً همان
+        # کلیدهای «نتیجهٔ معامله» را دارد (profit/amount) - ولی مقدار profit آن
+        # همیشه مثبت است (پیش‌بینیِ خوش‌بینانهٔ سود در صورت برد، نه نتیجهٔ واقعی).
+        # اگر این پیام اشتباهاً به‌عنوان نتیجهٔ یک معامله تفسیر شود، هر معامله
+        # (چه واقعاً برنده چه بازنده) به‌عنوان WIN لیبل می‌خورد. برای جلوگیری از
+        # این آلودگی، فقط رویدادهایی که در نامشان "close" هست (یا نامشان اصلاً
+        # شناخته‌نشده - برای سازگاری با فرمت‌های ساده‌ای که این مشکل را ندارند)
+        # اجازهٔ ورود به deal_buffer را دارند؛ رویدادهای شناخته‌شدهٔ غیر-close
+        # (مثل successopenOrder) صریحاً رد می‌شوند و به جای آن‌ها محاسبهٔ داخلی
+        # (tick_fallback) جایگزین می‌شود - که همیشه در دسترس و درست است.
+        is_known_non_result_event = (
+            associated_event_name is not None and "close" not in associated_event_name.lower()
+        )
+        if self.deal_buffer is not None and not is_known_non_result_event:
             for deal in extract_deal_candidates(payload):
                 self.deal_buffer.add(deal)
 
