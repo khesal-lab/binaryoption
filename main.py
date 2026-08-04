@@ -192,6 +192,7 @@ async def auto_trade_task(
     market_structure: MarketStructureTracker,
     trade_history: TradeHistory,
     click_source_holder: dict,
+    pending_confidence_holder: dict,
     data_logger: DataLogger,
     stop_event: asyncio.Event,
     micro_candle_aggregator: CandleAggregator,
@@ -299,12 +300,14 @@ async def auto_trade_task(
             continue
 
         click_source_holder["source"] = "bot"
+        pending_confidence_holder["confidence"] = confidence
         clicked = await click_trade_button(page, direction)
         if clicked:
             last_trade_monotonic = now
             print(f"[AutoTrade] معاملهٔ خودکار {direction} ثبت شد (اطمینان مدل: {confidence:.1%})")
         else:
             click_source_holder["source"] = "manual"
+            pending_confidence_holder["confidence"] = None
 
 
 async def main() -> None:
@@ -346,12 +349,19 @@ async def main() -> None:
     # روی کلیک دستی کاربر و هم روی همین کلیک برنامه‌ای صدا زده می‌شود، این
     # مقدار را می‌خواند تا بداند این معامله را با کدام برچسب (manual/bot) ثبت کند.
     click_source_holder = {"source": "manual"}
+    # همان الگوی click_source_holder: چون خودِ AUTO_TRADE مستقیماً capture_entry
+    # را صدا نمی‌زند (بلکه دکمهٔ خودِ پلتفرم را کلیک می‌کند و این کلیک، شنوندهٔ
+    # زیر را فعال می‌کند)، اطمینان مدل هم باید از همین طریق واسط منتقل شود تا
+    # لحظهٔ ثبت معامله در دسترس باشد - برای معاملهٔ دستی همیشه None می‌ماند.
+    pending_confidence_holder: dict = {"confidence": None}
 
     def _make_on_click(direction: str):
         def _callback() -> None:
             source = click_source_holder["source"]
             click_source_holder["source"] = "manual"
-            data_logger.capture_entry(direction, source=source)
+            confidence = pending_confidence_holder["confidence"]
+            pending_confidence_holder["confidence"] = None
+            data_logger.capture_entry(direction, source=source, confidence=confidence)
         return _callback
 
     # شنود کلیک واقعی روی دکمه‌های BUY/SELL خودِ پلتفرم — روش اصلی ثبت معامله
@@ -388,8 +398,8 @@ async def main() -> None:
             asyncio.create_task(
                 auto_trade_task(
                     page, predictor, tick_buffer, tick_history, candle_aggregator,
-                    market_structure, trade_history, click_source_holder, data_logger, stop_event,
-                    micro_candle_aggregator,
+                    market_structure, trade_history, click_source_holder, pending_confidence_holder,
+                    data_logger, stop_event, micro_candle_aggregator,
                 )
             )
         )

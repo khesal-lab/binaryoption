@@ -344,12 +344,17 @@ class DataLogger:
               f"از این لحظه دوباره از صفر ذخیره می‌شود.")
 
     # -- ثبت لحظهٔ ورود --------------------------------------------------------
-    def capture_entry(self, direction: Direction, source: str = "manual") -> None:
+    def capture_entry(self, direction: Direction, source: str = "manual", confidence: Optional[float] = None) -> None:
         """
         این تابع در لحظهٔ فشردن کلید توسط کاربر (source="manual") یا کلیک
         خودکار ربات معامله‌گر (source="bot") صدا زده می‌شود. یک اسنپ‌شات کامل
         و کاملاً نسبی از وضعیت فعلی بازار می‌گیرد و یک Task پس‌زمینه برای ارزیابی
         نتیجه بعد از expiry_seconds ثانیه ایجاد می‌کند (بدون بلاک کردن بقیهٔ برنامه).
+
+        confidence فقط برای معاملات source="bot" مقدار دارد (همان احتمال بردی
+        که src/live_predictor.py برای همین جهت پیش‌بینی کرده بود، درست همان
+        لحظهٔ کلیک) - قبلاً فقط در ترمینال چاپ می‌شد و برای تحلیل بعدی از
+        دست می‌رفت؛ حالا مستقیماً همراه خودِ معامله ذخیره می‌شود.
         """
         latest = self.tick_buffer.latest()
         if latest is None:
@@ -380,6 +385,7 @@ class DataLogger:
 
         snapshot["direction"] = direction
         snapshot["meta_trade_source"] = source
+        snapshot["meta_model_confidence"] = confidence
 
         pending = PendingTrade(
             direction=direction,

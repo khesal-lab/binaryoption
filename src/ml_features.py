@@ -46,6 +46,11 @@ _EXCLUDED_COLUMNS = {
     "meta_trade_source",
     "meta_payout_percent",  # فقط بعد از پایان معامله معلوم می‌شود - نشت اطلاعات
     "meta_is_refund",  # متادیتا برای فیلتر کردن معاملات ریفاندی، نه ورودی مدل
+    # نشت اطلاعات نیست (پیش از نتیجه، در لحظهٔ کلیک محاسبه می‌شود)، ولی چون فقط
+    # برای معاملات source="bot" مقدار دارد (نه level_strategy که اصلاً بخش عمدهٔ
+    # دادهٔ ترین است)، به‌عنوان ورودی مدل عملاً بی‌فایده/گمراه‌کننده است - فقط
+    # برای تحلیل بعدی (analyze_confidence_calibration.py و مشابه) نگه داشته می‌شود.
+    "meta_model_confidence",
     "result_source",
     "tick_fallback_result",
     "price_change_pct",  # فقط بعد از پایان معامله معلوم می‌شود - نشت اطلاعات
