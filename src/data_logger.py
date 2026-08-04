@@ -111,6 +111,29 @@ def _resolve_deal_dict(deal: dict) -> dict:
     return deal
 
 
+def _extract_precise_close_timestamp(deal: dict) -> Optional[float]:
+    """
+    زمان دقیق (با میلی‌ثانیه) بسته‌شدن معامله را از پیام خودِ پلتفرم می‌خواند
+    (closeTimestamp + closeMs/۱۰۰۰)، اگر موجود باشد.
+
+    با بررسی دادهٔ واقعی معلوم شد معاملات همیشه دقیقاً TRADE_EXPIRY_SECONDS
+    بعد از لحظهٔ کلیک بسته نمی‌شوند - ظاهراً به یک شبکهٔ زمانی مطلق گرد
+    می‌شوند (مثلاً نوع انقضای "S3")، نه دقیقاً از لحظهٔ ورود. در یک نمونهٔ
+    واقعی این اختلاف نزدیک به ۰.۸ ثانیه بود. اگر tick_fallback با فرض ثابتِ
+    entry_time+expiry_seconds محاسبه شود، ممکن است تیکِ اشتباهی (بعد از این‌که
+    قیمت زمان بیشتری برای نوسان و برگشتن به نزدیکیِ سطح قبلی داشته) به‌عنوان
+    قیمت خروج برداشته شود - دقیقاً باعث اختلاف کاذب با نتیجهٔ واقعیِ ws_deal
+    می‌شود، نه یک باگ در لیبل نهایی (که همیشه از خودِ ws_deal می‌آید).
+    """
+    lower_map = {str(k).lower(): v for k, v in deal.items()}
+    close_ts = lower_map.get("closetimestamp")
+    if not isinstance(close_ts, (int, float)) or close_ts <= 0:
+        return None
+    close_ms = lower_map.get("closems")
+    frac = (close_ms / 1000.0) if isinstance(close_ms, (int, float)) else 0.0
+    return float(close_ts) + frac
+
+
 def _interpret_deal_candidate(deal: dict) -> Optional[int]:
     """
     تلاش می‌کند از یک دیکشنری کاندیدای «نتیجهٔ معامله» یک لیبل ۰/۱ دربیاورد.
@@ -397,6 +420,20 @@ class DataLogger:
         result_source = "tick_fallback"
         raw_deal = await self._find_platform_deal_result(pending)
         if raw_deal is not None:
+            resolved_deal = _resolve_deal_dict(raw_deal)
+            # اگر پلتفرم زمان دقیق بسته‌شدن را هم گزارش کرده و با فرض ثابتِ ما
+            # فرق دارد، tick_fallback را با همان لحظهٔ دقیق دوباره محاسبه
+            # می‌کنیم - تا ستون tick_fallback_result (که برای بررسی سلامت لیبل
+            # با ws_deal مقایسه می‌شود) بی‌جهت متفاوت از نتیجهٔ واقعی نباشد.
+            precise_close_ts = _extract_precise_close_timestamp(resolved_deal)
+            if precise_close_ts is not None and abs(precise_close_ts - exit_timestamp) > 0.05:
+                precise_exit_price = self.tick_history.price_at_or_after(precise_close_ts)
+                if precise_exit_price is not None:
+                    tick_fallback_result = self._determine_result(
+                        pending.direction, pending.entry_price, precise_exit_price
+                    )
+                    result = tick_fallback_result
+
             interpreted = _interpret_deal_candidate(raw_deal)
             if interpreted is not None:
                 result = interpreted
