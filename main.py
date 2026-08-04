@@ -230,7 +230,8 @@ async def auto_trade_task(
     }
     gate_pass_count = 0
 
-    print(f"[AutoTrade] حالت معاملهٔ خودکار فعال شد | آستانهٔ اطمینان: "
+    print(f"[AutoTrade] حالت معاملهٔ خودکار فعال شد | جهت‌گیری: "
+          f"{config.AUTO_TRADE_DIRECTION_MODE} | آستانهٔ اطمینان: "
           f"{config.AUTO_TRADE_CONFIDENCE_THRESHOLD:.0%} | فاصلهٔ حداقلی بین معاملات: "
           f"{config.AUTO_TRADE_COOLDOWN_SECONDS} ثانیه")
 
@@ -294,7 +295,19 @@ async def auto_trade_task(
         )
         snapshot.update(trade_history.as_feature_dict())
 
-        direction, confidence = predictor.predict_direction(snapshot)
+        if config.AUTO_TRADE_DIRECTION_MODE == "level_strategy":
+            # جهت را خودِ مدل انتخاب نمی‌کند؛ همان جهتِ implied سطحی که قیمت
+            # الان به آن نزدیک‌تر است (سقف یا کف کندل جاری) گرفته می‌شود و
+            # مدل فقط اطمینانِ همان جهت را می‌سنجد (فیلتر، نه انتخاب‌گر).
+            if near_high_gap <= near_low_gap:
+                direction_value = level_context["level_strategy_near_high_implied_direction"]
+            else:
+                direction_value = level_context["level_strategy_near_low_implied_direction"]
+            direction = "CALL" if direction_value == 1 else "PUT"
+            confidence = predictor.predict_confidence_for_direction(snapshot, direction)
+        else:
+            direction, confidence = predictor.predict_direction(snapshot)
+
         if direction is None or confidence < config.AUTO_TRADE_CONFIDENCE_THRESHOLD:
             skip_counts["low_confidence"] += 1
             continue
