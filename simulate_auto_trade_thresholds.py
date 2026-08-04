@@ -17,9 +17,15 @@ src/live_predictor.predict_direction - و جهتِ «شبیه‌سازی‌شد�
 شبیه‌سازی‌شده مستقیم از روی همان ستون result واقعی استنتاج می‌شود - بدون
 نیاز به هیچ دادهٔ جدید یا معاملهٔ واقعی تازه.
 
-⚠️ همان محدودیتِ analyze_confidence_calibration.py این‌جا هم صادق است: این
-شبیه‌سازی روی مدلِ فعلاً ذخیره‌شده کار می‌کند، نه لزوماً مدلی که با دادهٔ
-کاملاً تمیز (بعد از فیکس closeTimestamp) دوباره ترین شده باشد.
+⚠️ همان محدودیتِ Overfitting در analyze_confidence_calibration.py این‌جا هم
+صادق است: مدل احتمالاً بخشی از دادهٔ ترینِ خودش را حفظ کرده، پس شبیه‌سازی
+روی آن دادهٔ درون‌نمونه خوش‌بینانه است. به همین دلیل معاملات بر اساس زمان
+ذخیره‌شدن مدل (mtime فایل مدل) به درون‌نمونه/برون‌نمونه تقسیم می‌شوند و
+گزارش برون‌نمونه (تست واقعی) جدا و اول نشان داده می‌شود.
+
+⚠️ نکتهٔ دیگر: این شبیه‌سازی روی مدلِ فعلاً ذخیره‌شده کار می‌کند، نه لزوماً
+مدلی که با دادهٔ کاملاً تمیز (بعد از فیکس closeTimestamp) دوباره ترین
+شده باشد.
 
 این اسکریپت فقط خواندنی است؛ هیچ تغییری در دیتابیس، مدل، یا config.py نمی‌دهد.
 
@@ -60,6 +66,22 @@ def _load_all_trades() -> pd.DataFrame:
         df = df[~df["meta_is_refund"].fillna(False).astype(bool)]
     df["result"] = df["result"].astype(int)
     return df.reset_index(drop=True)
+
+
+def _split_in_out_of_sample(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    تفکیک معاملات به «درون‌نمونه» (قبل/هم‌زمان با آخرین ذخیره‌شدن مدل - مدل
+    ممکن است این‌ها را در ترین حفظ کرده باشد) و «برون‌نمونه» (بعد از آن -
+    مدل هرگز ندیده). شبیه‌سازی روی دادهٔ درون‌نمونه می‌تواند به‌خاطر Overfitting
+    خوش‌بینانه باشد؛ فقط عدد برون‌نمونه واقعاً نشان می‌دهد این ترکیب آستانه‌ها
+    در عمل (روی موقعیت‌های ندیده) چه نتیجه‌ای می‌دهد.
+    """
+    if "meta_entry_timestamp" not in df.columns:
+        return df, df.iloc[0:0]
+    model_mtime = config.LIVE_MODEL_JSON_PATH.stat().st_mtime
+    in_sample = df[df["meta_entry_timestamp"] <= model_mtime]
+    out_of_sample = df[df["meta_entry_timestamp"] > model_mtime]
+    return in_sample, out_of_sample
 
 
 def _predict_both_directions(
@@ -141,8 +163,28 @@ def main() -> None:
     print(f"در {changed} ردیف از {len(df)} ({changed / len(df):.1%})، جهتِ شبیه‌سازی‌شده با جهتِ واقعاً "
           f"معامله‌شده فرق داشت (طبیعی برای معاملات level_strategy که اصلاً از مدل پرسیده نشده بودند).")
 
-    _report_grid(df)
-    _report_specific(df, confidence=0.75, margins=[0.15, 0.20])
+    in_sample, out_of_sample = _split_in_out_of_sample(df)
+    model_saved_at = pd.Timestamp(config.LIVE_MODEL_JSON_PATH.stat().st_mtime, unit="s")
+    print(f"\nمدل در {model_saved_at} (به‌وقت سیستم) ذخیره شده.")
+    print(f"  درون‌نمونه (قبل/هم‌زمان با ترین - ممکن است مدل حفظشان کرده باشد): {len(in_sample)}")
+    print(f"  برون‌نمونه (بعد از ترین - مدل هرگز ندیده، تست واقعی): {len(out_of_sample)}")
+
+    print("\n" + "=" * 70)
+    if len(out_of_sample) >= MIN_N_TO_REPORT:
+        print("شبیه‌سازی روی معاملات برون‌نمونه (تست واقعی - این بخش قابل‌اعتماد است)")
+        print("=" * 70)
+        _report_grid(out_of_sample)
+        _report_specific(out_of_sample, confidence=0.75, margins=[0.15, 0.20])
+    else:
+        print("شبیه‌سازی روی معاملات برون‌نمونه")
+        print("=" * 70)
+        print(f"⚠️ فقط {len(out_of_sample)} معاملهٔ برون‌نمونه موجود است - نتیجه هنوز قابل‌اعتماد نیست.")
+
+    print("\n" + "=" * 70)
+    print("شبیه‌سازی روی معاملات درون‌نمونه (⚠️ ممکن است به‌خاطر Overfitting خوش‌بینانه باشد - فقط برای مقایسه)")
+    print("=" * 70)
+    _report_grid(in_sample)
+    _report_specific(in_sample, confidence=0.75, margins=[0.15, 0.20])
 
 
 if __name__ == "__main__":
