@@ -205,6 +205,19 @@ class TickHistory:
         """خالی‌کردن کامل بافر - مثلاً وقتی نماد معاملاتی عوض شده و تیک‌های قبلی دیگر معتبر نیستند."""
         self.buffer.clear()
 
+    def price_at_or_after(self, timestamp: float) -> Optional[float]:
+        """
+        نزدیک‌ترین قیمت ثبت‌شده بعد (یا مساوی) یک timestamp مشخص را برمی‌گرداند.
+        برخلاف TickBuffer.latest_price_after (که فقط چند تیک آخر - پیش‌فرض ۱۰
+        تا - را نگه می‌دارد)، این بافر بلندتر (پیش‌فرض ۲۰۰ تیک) است تا حتی بعد
+        از چند ثانیه تأخیرِ اضافه (مثلاً صبر برای پیام نتیجهٔ معامله از پلتفرم)
+        هنوز تیک لحظهٔ دقیق موردنظر در آن باقی مانده باشد.
+        """
+        candidates = [t for t in self.buffer if t.timestamp >= timestamp]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda t: t.timestamp - timestamp).price
+
     def _pct_returns(self) -> list[float]:
         ticks = list(self.buffer)
         returns = []
