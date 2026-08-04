@@ -18,12 +18,20 @@
 اطمینان اصلاً در آن‌ها دیده نمی‌شود. بازسازی روی *همهٔ* معاملات، کل طیف
 اطمینان را نشان می‌دهد.
 
-⚠️ نکتهٔ مهم: این اسکریپت با مدلِ *فعلاً ذخیره‌شده* در data/models/ کار
+⚠️ نکتهٔ مهم دربارهٔ Overfitting: کالیبراسیون را روی *همهٔ* معاملات حساب
+کردن گمراه‌کننده است - چون مدل احتمالاً بخشی از دادهٔ ترینِ خودش را حفظ
+کرده، وین‌ریتِ «به‌ظاهر عالی» روی آن دادهٔ درون‌نمونه می‌تواند فقط بازتاب
+حفظ‌کردن باشد، نه توانایی پیش‌بینی واقعی (دقیقاً همان چیزی که یک‌بار در
+عمل دیده شد: کالیبراسیون بک‌تست‌شده عالی به‌نظر می‌رسید، ولی وین‌ریت
+معاملهٔ زندهٔ بعدی زیر ۵۰٪ افتاد). به همین دلیل این اسکریپت معاملات را بر
+اساس زمان ذخیره‌شدن مدل (mtime فایل مدل) به دو گروه تقسیم می‌کند:
+درون‌نمونه (قبل از ترین - قابل‌اعتماد نیست) و برون‌نمونه (بعد از ترین -
+مدل هرگز ندیده، تنها معیار واقعی).
+
+⚠️ نکتهٔ دیگر: این اسکریپت با مدلِ *فعلاً ذخیره‌شده* در data/models/ کار
 می‌کند (همان فایلی که main.py هم طبق config.LIVE_MODEL_VARIANT استفاده
 می‌کند). اگر این مدل با دادهٔ قدیمی‌تر (قبل از رفع باگ زمان دقیق بسته‌شدن
-معامله) ترین شده باشد، این تحلیل هم به همان محدودیت آغشته است - همچنان
-نشان می‌دهد مدل *فعلی* چطور رفتار می‌کند، ولی بعد از ترین بعدی با دادهٔ
-تازه بهتر است دوباره اجرا شود.
+معامله) ترین شده باشد، این تحلیل هم به همان محدودیت آغشته است.
 
 این اسکریپت فقط خواندنی است؛ هیچ تغییری در دیتابیس یا مدل نمی‌دهد.
 
@@ -65,6 +73,28 @@ def _load_all_trades() -> pd.DataFrame:
         df = df[~df["meta_is_refund"].fillna(False).astype(bool)]
     df["result"] = df["result"].astype(int)
     return df.reset_index(drop=True)
+
+
+def _split_in_out_of_sample(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    تفکیک معاملات به «درون‌نمونه» (قبل/هم‌زمان با آخرین ذخیره‌شدن مدل - یعنی
+    مدل احتمالاً این‌ها را در ترین دیده) و «برون‌نمونه» (بعد از آن - یعنی مدل
+    هرگز این‌ها را ندیده، دقیقاً مثل معاملهٔ زندهٔ واقعی بعد از ترین).
+
+    کالیبراسیون روی دادهٔ درون‌نمونه گمراه‌کننده است: با ده‌ها فیچر روی چند
+    هزار ردیف، مدل به‌راحتی می‌تواند بخشی از دادهٔ ترین را حفظ کند
+    (Overfitting) - پس وین‌ریت بالا در آن گروه لزوماً توانایی پیش‌بینی واقعی
+    نیست، فقط یادآوری. عدد برون‌نمونه تنها معیاری است که واقعاً نشان می‌دهد
+    مدل روی موقعیت‌های ندیده چطور عمل می‌کند - دقیقاً همان چیزی که K-Fold در
+    train/train_model.py هم اندازه می‌گیرد (و همیشه پایین‌تر از عدد ساده‌لوحانهٔ
+    «دقت روی کل داده» بوده است).
+    """
+    if "meta_entry_timestamp" not in df.columns:
+        return df, df.iloc[0:0]
+    model_mtime = config.LIVE_MODEL_JSON_PATH.stat().st_mtime
+    in_sample = df[df["meta_entry_timestamp"] <= model_mtime]
+    out_of_sample = df[df["meta_entry_timestamp"] > model_mtime]
+    return in_sample, out_of_sample
 
 
 def _compute_confidence(df: pd.DataFrame, model: xgb.XGBClassifier, feature_names: list[str]) -> pd.Series:
@@ -148,9 +178,32 @@ def main() -> None:
     print(f"میانگین اطمینان محاسبه‌شده: {df['confidence'].mean():.1%}   |   "
           f"کمینه: {df['confidence'].min():.1%}   |   بیشینه: {df['confidence'].max():.1%}")
 
-    _report_bucketed_calibration(df)
-    _report_threshold_scan(df)
-    _report_brier_score(df)
+    in_sample, out_of_sample = _split_in_out_of_sample(df)
+    model_saved_at = pd.Timestamp(config.LIVE_MODEL_JSON_PATH.stat().st_mtime, unit="s")
+    print(f"\nمدل در {model_saved_at} (به‌وقت سیستم) ذخیره شده.")
+    print(f"  معاملات درون‌نمونه (قبل/هم‌زمان با ترین - مدل ممکن است حفظشان کرده باشد): {len(in_sample)}")
+    print(f"  معاملات برون‌نمونه (بعد از ترین - مدل هرگز ندیده، تست واقعی): {len(out_of_sample)}")
+
+    print("\n" + "=" * 70)
+    if len(out_of_sample) >= MIN_N_FOR_THRESHOLD:
+        print("گزارش برون‌نمونه (تست واقعی روی داده‌ای که مدل هرگز ندیده - این بخش قابل‌اعتماد است)")
+        print("=" * 70)
+        _report_bucketed_calibration(out_of_sample)
+        _report_threshold_scan(out_of_sample)
+        _report_brier_score(out_of_sample)
+    else:
+        print("گزارش برون‌نمونه")
+        print("=" * 70)
+        print(f"⚠️ فقط {len(out_of_sample)} معاملهٔ برون‌نمونه موجود است (کمتر از {MIN_N_FOR_THRESHOLD}) - "
+              "برای نتیجهٔ قابل‌اعتماد باید صبر کرد تا معاملات بیشتری بعد از این ترین جمع شود. "
+              "تا آن زمان، به گزارش درون‌نمونهٔ پایین فقط برای مقایسه نگاه کنید، نه تصمیم‌گیری.")
+
+    print("\n" + "=" * 70)
+    print("گزارش درون‌نمونه (⚠️ ممکن است به‌خاطر Overfitting خوش‌بینانه باشد - فقط برای مقایسه با بالا)")
+    print("=" * 70)
+    _report_bucketed_calibration(in_sample)
+    _report_threshold_scan(in_sample)
+    _report_brier_score(in_sample)
 
 
 if __name__ == "__main__":
