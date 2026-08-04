@@ -430,7 +430,20 @@ async def launch_browser_and_wait_for_login() -> tuple[BrowserContext, Page]:
     context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
     page = context.pages[0] if context.pages else await context.new_page()
 
-    await page.goto(config.POCKET_OPTION_URL, wait_until="domcontentloaded")
+    try:
+        await page.goto(config.POCKET_OPTION_URL, wait_until="domcontentloaded")
+    except Exception as exc:  # noqa: BLE001 - فقط برای تشخیص net::ERR_ABORTED
+        if "ERR_ABORTED" not in str(exc):
+            raise
+        # چون USER_DATA_DIR نشست لاگین را بین اجراها نگه می‌دارد، اگر از قبل
+        # لاگین بوده باشید، خودِ Pocket Option بلافاصله از آدرس try-demo/ به
+        # داشبورد اصلی کاربر ریدایرکت می‌کند - این ریدایرکت گاهی با شرط انتظار
+        # "domcontentloaded" مسابقه می‌دهد و Playwright آن را net::ERR_ABORTED
+        # گزارش می‌کند (نه یک خطای واقعی شبکه). "commit" فقط منتظر شروع ناوبری
+        # می‌ماند، نه تکمیل کامل آن، و این مسابقه را دور می‌زند.
+        print("[Browser] هشدار: بارگذاری اولیه با ERR_ABORTED مواجه شد (احتمالاً ریدایرکت خودکار "
+              "به‌خاطر نشست لاگین قبلی) - تلاش دوباره با شرط انتظار سبک‌تر...")
+        await page.goto(config.POCKET_OPTION_URL, wait_until="commit")
 
     print("\n" + "=" * 70)
     print("لطفاً به‌صورت دستی وارد حساب دمو (Demo) خود در Pocket Option شوید.")
