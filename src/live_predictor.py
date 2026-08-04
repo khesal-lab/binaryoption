@@ -63,3 +63,14 @@ class LivePredictor:
         if call_prob > put_prob:
             return "CALL", call_prob
         return "PUT", put_prob
+
+    def predict_confidence_for_direction(self, base_snapshot: dict, direction: str) -> float:
+        """
+        احتمال بردِ مدل را فقط برای یک جهتِ از قبل تعیین‌شده (مثلاً جهتِ
+        level_strategy) برمی‌گرداند - بدون این‌که مدل خودش بین CALL/PUT
+        انتخاب کند. برای AUTO_TRADE_DIRECTION_MODE = "level_strategy" استفاده
+        می‌شود: جهت را قانون level_strategy تعیین می‌کند و مدل فقط به‌عنوان
+        فیلتر اطمینان روی همان جهت عمل می‌کند.
+        """
+        X = self._build_row(base_snapshot, direction)
+        return float(self.model.predict_proba(X)[0][1])
