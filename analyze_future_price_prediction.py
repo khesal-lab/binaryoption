@@ -140,10 +140,21 @@ class _Segment:
         می‌کند و برای هر نقطه، جهتِ implied level_strategy را برمی‌گرداند
         اگر آن لحظه «نزدیک سطح کلیدی» (سقف یا کف کندل جاری) بوده - دقیقاً
         همان معیاری که main.py برای gating استفاده می‌کند - وگرنه None.
+
+        نکتهٔ مهم دربارهٔ استقلال نمونه‌ها: وقتی قیمت نزدیک سقف/کف کندل
+        «می‌ایستد» (stall)، این توقف معمولاً چند تیک پشت‌سرهم طول می‌کشد -
+        همهٔ آن‌ها یک اتفاق واحدند، نه چند نمونهٔ مستقل (پنجرهٔ ۳-ثانیه‌ایِ
+        آینده‌شان هم روی هم می‌افتد). اگر همهٔ این تیک‌ها جداگانه شمرده شوند،
+        z-test بعدی (که فرض نمونه‌های مستقل دارد) عدد معناداریِ کاذب و
+        اغراق‌شده نشان می‌دهد. برای همین، فقط اولین تیکِ هر توقف - با همان
+        فاصلهٔ حداقلی‌ای که خودِ ربات زنده بین دو کلیک واقعی رعایت می‌کند
+        (config.LEVEL_STRATEGY_MIN_CLICK_INTERVAL_SECONDS) - به‌عنوان یک
+        نمونهٔ مستقل حساب می‌شود؛ بقیهٔ تیک‌های همان توقف None می‌مانند.
         """
         candle_aggregator = CandleAggregator()
         tick_history = TickHistory()
         implied_directions: list[int | None] = []
+        last_signal_timestamp: float | None = None
 
         for t, price in zip(self.timestamps, self.prices):
             tick = Tick(symbol=self.symbol, price=price, timestamp=t)
@@ -158,12 +169,16 @@ class _Segment:
                     price_position = (price - current_candle.low) / current_candle.range
                     near_high_gap = abs(price_position - level_context["level_strategy_near_high_position"])
                     near_low_gap = abs(price_position - level_context["level_strategy_near_low_position"])
-                    if (near_high_gap <= config.LEVEL_STRATEGY_MATCH_TOLERANCE_RATIO
-                            or near_low_gap <= config.LEVEL_STRATEGY_MATCH_TOLERANCE_RATIO):
+                    is_near_level = (near_high_gap <= config.LEVEL_STRATEGY_MATCH_TOLERANCE_RATIO
+                                      or near_low_gap <= config.LEVEL_STRATEGY_MATCH_TOLERANCE_RATIO)
+                    if is_near_level and (
+                            last_signal_timestamp is None
+                            or t - last_signal_timestamp >= config.LEVEL_STRATEGY_MIN_CLICK_INTERVAL_SECONDS):
                         if near_high_gap <= near_low_gap:
                             direction = level_context["level_strategy_near_high_implied_direction"]
                         else:
                             direction = level_context["level_strategy_near_low_implied_direction"]
+                        last_signal_timestamp = t
             implied_directions.append(direction)
 
         return implied_directions
@@ -234,7 +249,8 @@ def _report_unconditional_ngrams(segments: list[_Segment]) -> None:
 def _report_level_strategy_backtest(segments: list[_Segment]) -> None:
     print(f"\n{'=' * 70}\nبخش ۲: بک‌تست خودِ قانون level_strategy روی دادهٔ خام تیک - آیا در "
           f"لحظاتی که این استراتژی سیگنال می‌دهد، جهتِ implied آن واقعاً "
-          f"{HORIZON_SECONDS:.0f} ثانیه بعد می‌برد؟\n{'=' * 70}")
+          f"{HORIZON_SECONDS:.0f} ثانیه بعد می‌برد؟ (فقط اولین تیکِ هر توقف شمرده "
+          f"می‌شود - نگاه کنید به توضیح replay_level_strategy)\n{'=' * 70}")
 
     up_count = 0
     total = 0
