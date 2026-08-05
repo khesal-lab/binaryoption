@@ -232,12 +232,17 @@ async def auto_trade_task(
     skip_counts = {
         "blocked": 0, "cooldown": 0, "not_ready": 0, "no_candle": 0,
         "no_level_context": 0, "not_near_level": 0, "low_confidence": 0,
+        "confidence_above_max": 0,
     }
     gate_pass_count = 0
 
+    confidence_range_text = f"{config.AUTO_TRADE_CONFIDENCE_THRESHOLD:.0%}+"
+    if config.AUTO_TRADE_CONFIDENCE_MAX_THRESHOLD is not None:
+        confidence_range_text = (f"{config.AUTO_TRADE_CONFIDENCE_THRESHOLD:.0%} تا "
+                                  f"{config.AUTO_TRADE_CONFIDENCE_MAX_THRESHOLD:.0%}")
     print(f"[AutoTrade] حالت معاملهٔ خودکار فعال شد | جهت‌گیری: "
-          f"{config.AUTO_TRADE_DIRECTION_MODE} | آستانهٔ اطمینان: "
-          f"{config.AUTO_TRADE_CONFIDENCE_THRESHOLD:.0%} | فاصلهٔ حداقلی بین معاملات: "
+          f"{config.AUTO_TRADE_DIRECTION_MODE} | بازهٔ اطمینان: "
+          f"{confidence_range_text} | فاصلهٔ حداقلی بین معاملات: "
           f"{config.AUTO_TRADE_COOLDOWN_SECONDS} ثانیه")
 
     while not stop_event.is_set():
@@ -252,6 +257,7 @@ async def auto_trade_task(
                   f"{skip_counts['no_candle']} بار کندل/تیک آماده نبود، "
                   f"{skip_counts['not_ready']} بار هنوز تیک/وب‌ساکت آماده نبود، "
                   f"{skip_counts['low_confidence']} بار اطمینان مدل کمتر از آستانه بود، "
+                  f"{skip_counts['confidence_above_max']} بار اطمینان مدل بالاتر از سقف بازه بود، "
                   f"{skip_counts['blocked']} بار معاملهٔ خودکار متوقف بود، "
                   f"{skip_counts['cooldown']} بار در فاصلهٔ خنک‌شدن بعد از معاملهٔ قبلی بود.")
             for key in skip_counts:
@@ -315,6 +321,11 @@ async def auto_trade_task(
 
         if direction is None or confidence < config.AUTO_TRADE_CONFIDENCE_THRESHOLD:
             skip_counts["low_confidence"] += 1
+            continue
+
+        if (config.AUTO_TRADE_CONFIDENCE_MAX_THRESHOLD is not None
+                and confidence > config.AUTO_TRADE_CONFIDENCE_MAX_THRESHOLD):
+            skip_counts["confidence_above_max"] += 1
             continue
 
         click_source_holder["source"] = "bot"
