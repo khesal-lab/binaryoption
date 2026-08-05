@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import Optional
 
 import config
 from src.browser_session import (
@@ -49,6 +50,7 @@ from src.trade_executor import click_trade_button
 from src.live_predictor import LivePredictor
 from src.symbol_tracker import SymbolSwitchDetector
 from src.config_reloader import config_hot_reload_task
+from src.tick_direction_logger import TickDirectionLogger
 
 
 async def tick_consumer_task(
@@ -58,6 +60,7 @@ async def tick_consumer_task(
     candle_aggregator: CandleAggregator,
     market_structure: MarketStructureTracker,
     micro_candle_aggregator: CandleAggregator,
+    tick_direction_logger: Optional[TickDirectionLogger] = None,
 ) -> None:
     """
     Task 1: پیوسته از صف تیک‌های خام می‌خواند، بافرها و کندل‌ساز را به‌روز می‌کند.
@@ -101,6 +104,8 @@ async def tick_consumer_task(
         if closed_candle is not None:
             market_structure.ingest_closed_candle(closed_candle)
         micro_candle_aggregator.add_tick(tick)
+        if tick_direction_logger is not None:
+            tick_direction_logger.record(tick)
 
 
 async def hotkey_listener_task(data_logger: DataLogger, stop_event: asyncio.Event) -> None:
@@ -227,12 +232,17 @@ async def auto_trade_task(
     skip_counts = {
         "blocked": 0, "cooldown": 0, "not_ready": 0, "no_candle": 0,
         "no_level_context": 0, "not_near_level": 0, "low_confidence": 0,
+        "confidence_above_max": 0,
     }
     gate_pass_count = 0
 
+    confidence_range_text = f"{config.AUTO_TRADE_CONFIDENCE_THRESHOLD:.0%}+"
+    if config.AUTO_TRADE_CONFIDENCE_MAX_THRESHOLD is not None:
+        confidence_range_text = (f"{config.AUTO_TRADE_CONFIDENCE_THRESHOLD:.0%} تا "
+                                  f"{config.AUTO_TRADE_CONFIDENCE_MAX_THRESHOLD:.0%}")
     print(f"[AutoTrade] حالت معاملهٔ خودکار فعال شد | جهت‌گیری: "
-          f"{config.AUTO_TRADE_DIRECTION_MODE} | آستانهٔ اطمینان: "
-          f"{config.AUTO_TRADE_CONFIDENCE_THRESHOLD:.0%} | فاصلهٔ حداقلی بین معاملات: "
+          f"{config.AUTO_TRADE_DIRECTION_MODE} | بازهٔ اطمینان: "
+          f"{confidence_range_text} | فاصلهٔ حداقلی بین معاملات: "
           f"{config.AUTO_TRADE_COOLDOWN_SECONDS} ثانیه")
 
     while not stop_event.is_set():
@@ -247,6 +257,7 @@ async def auto_trade_task(
                   f"{skip_counts['no_candle']} بار کندل/تیک آماده نبود، "
                   f"{skip_counts['not_ready']} بار هنوز تیک/وب‌ساکت آماده نبود، "
                   f"{skip_counts['low_confidence']} بار اطمینان مدل کمتر از آستانه بود، "
+                  f"{skip_counts['confidence_above_max']} بار اطمینان مدل بالاتر از سقف بازه بود، "
                   f"{skip_counts['blocked']} بار معاملهٔ خودکار متوقف بود، "
                   f"{skip_counts['cooldown']} بار در فاصلهٔ خنک‌شدن بعد از معاملهٔ قبلی بود.")
             for key in skip_counts:
@@ -312,6 +323,11 @@ async def auto_trade_task(
             skip_counts["low_confidence"] += 1
             continue
 
+        if (config.AUTO_TRADE_CONFIDENCE_MAX_THRESHOLD is not None
+                and confidence > config.AUTO_TRADE_CONFIDENCE_MAX_THRESHOLD):
+            skip_counts["confidence_above_max"] += 1
+            continue
+
         click_source_holder["source"] = "bot"
         pending_confidence_holder["confidence"] = confidence
         clicked = await click_trade_button(page, direction)
@@ -335,6 +351,12 @@ async def main() -> None:
 
     deal_buffer = DealResultBuffer()
     asset_payout_tracker = AssetPayoutTracker()
+
+    tick_direction_logger: Optional[TickDirectionLogger] = None
+    if config.TICK_DIRECTION_LOGGING_ENABLED:
+        tick_direction_logger = TickDirectionLogger()
+        print(f"[Main] لاگ خام جهت تیک‌ها فعال است - "
+              f"analyze_tick_direction_patterns.py بعداً می‌تواند این را تحلیل کند.")
 
     context, page = await launch_browser_and_wait_for_login()
 
@@ -398,7 +420,7 @@ async def main() -> None:
         asyncio.create_task(
             tick_consumer_task(
                 tick_queue, tick_buffer, tick_history, candle_aggregator, market_structure,
-                micro_candle_aggregator,
+                micro_candle_aggregator, tick_direction_logger,
             )
         ),
         asyncio.create_task(hotkey_listener_task(data_logger, stop_event)),
@@ -426,6 +448,8 @@ async def main() -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
         data_logger.close()
+        if tick_direction_logger is not None:
+            tick_direction_logger.close()
         await context.close()
         print(f"[Main] دیتاست در {config.CSV_LOG_PATH} و {config.SQLITE_DB_PATH} ذخیره شد.")
 

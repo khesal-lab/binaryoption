@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import Optional
 
 import config
 from src.browser_session import (
@@ -50,6 +51,7 @@ from src.level_strategy import LevelStrategyTracker
 from src.level_strategy_optimized import OptimizedLevelStrategyTracker
 from src.symbol_tracker import SymbolSwitchDetector
 from src.config_reloader import config_hot_reload_task
+from src.tick_direction_logger import TickDirectionLogger
 
 
 async def tick_consumer_and_strategy_task(
@@ -63,6 +65,7 @@ async def tick_consumer_and_strategy_task(
     click_source_holder: dict,
     data_logger: DataLogger,
     micro_candle_aggregator: CandleAggregator,
+    tick_direction_logger: Optional[TickDirectionLogger] = None,
 ) -> None:
     """
     نسخهٔ گسترش‌یافتهٔ tick_consumer_task اصلی (main.py): علاوه بر
@@ -111,6 +114,8 @@ async def tick_consumer_and_strategy_task(
             market_structure.ingest_closed_candle(closed_candle)
             level_tracker.on_new_candle(closed_candle)
         micro_candle_aggregator.add_tick(tick)
+        if tick_direction_logger is not None:
+            tick_direction_logger.record(tick)
 
         current_candle = candle_aggregator.current
         if current_candle is not None and prev_tick is not None and not data_logger.is_bot_trading_blocked():
@@ -205,6 +210,12 @@ async def main() -> None:
     deal_buffer = DealResultBuffer()
     asset_payout_tracker = AssetPayoutTracker()
 
+    tick_direction_logger: Optional[TickDirectionLogger] = None
+    if config.TICK_DIRECTION_LOGGING_ENABLED:
+        tick_direction_logger = TickDirectionLogger()
+        print(f"[CollectData] لاگ خام جهت تیک‌ها فعال است - "
+              f"analyze_tick_direction_patterns.py بعداً می‌تواند این را تحلیل کند.")
+
     context, page = await launch_browser_and_wait_for_login()
 
     ws_listener = WebSocketListener(tick_queue, deal_buffer, asset_payout_tracker)
@@ -258,7 +269,7 @@ async def main() -> None:
             tick_consumer_and_strategy_task(
                 tick_queue, tick_buffer, tick_history, candle_aggregator, market_structure,
                 level_tracker, page, click_source_holder, data_logger,
-                micro_candle_aggregator,
+                micro_candle_aggregator, tick_direction_logger,
             )
         ),
         asyncio.create_task(hotkey_listener_task(data_logger, stop_event)),
@@ -274,6 +285,8 @@ async def main() -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
         data_logger.close()
+        if tick_direction_logger is not None:
+            tick_direction_logger.close()
         await context.close()
         print(f"[CollectData] دیتاست در {config.CSV_LOG_PATH} و {config.SQLITE_DB_PATH} ذخیره شد.")
 
