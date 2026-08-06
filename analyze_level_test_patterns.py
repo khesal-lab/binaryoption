@@ -20,6 +20,31 @@
 زمینه در نظر گرفته می‌شود و با z-test بررسی می‌شود آیا زمینه‌های خاصی نسبت
 عبور/بازگشت را از نرخ پایه به‌طور معنادار جدا می‌کنند.
 
+علاوه بر الگوی گسستهٔ جهت (+۱/-۱)، دو فیچر پیوسته هم در لحظهٔ تست محاسبه و
+با میانه به دو گروه تقسیم می‌شوند (همان روش analyze_level_strategy.py برای
+فیچرهای پیوسته):
+    - سرعتِ درصدی (Momentum) - دقیقاً همان تعریف TickBuffer.get_velocity_pct
+      (درصد تغییر قیمت بین دو تیک آخر، تقسیم بر تغییر زمان)
+    - شتابِ درصدی (Acceleration) - همان تعریف TickBuffer.get_acceleration_pct
+
+⚠️ حجم معاملات (Volume) در این تحلیل نیست چون اصلاً در دسترس نیست: پیام‌های
+خام وب‌ساکت Pocket Option برای هر تیک فقط [symbol, timestamp, price] دارند
+(نگاه کنید به src/browser_session.py:extract_ticks_from_payload) - هیچ
+فیلد حجمی وجود ندارد، چون این یک فیدِ قیمتِ synthetic/OTC است، نه یک
+اوردربوکِ صرافیِ واقعی با حجم معامله.
+
+⚠️ فاصلهٔ دقیقِ قیمت از سطح (gap) عمداً از این گزارش حذف شده: در اعتبارسنجی
+روی دادهٔ synthetic بدون هیچ سیگنال واقعی (random walk خالص)، تفکیک بر
+اساس این فیچر به‌طور مکرر (روی هر ۶ seed تصادفیِ متفاوتی که امتحان شد)
+اختلاف کاذب و «معنادار» نشان می‌داد - نه یک false positive تصادفی یک‌باره.
+علتش این بود: gap=0 تقریباً همیشه یعنی همین تیک دارد یک اکسترمم *تازه* را
+می‌سازد (سرعت/جهت لحظه‌ای‌اش طبعاً هم‌جهت است)، در حالی که gap>0 معمولاً
+یعنی قیمت دارد یک سطحِ *قبلاً شکل‌گرفته* را دوباره تست می‌کند - این دو
+موقعیت پویایی کاملاً متفاوتی دارند و مقایسه‌شان زیر یک فیچر خطی گمراه‌کننده
+است. تفکیک درست‌تر (تازه/مجدد) خودش هم روی همان دادهٔ بدون سیگنال انحراف
+نشان داد، پس آن هم قابل‌اعتماد نبود؛ طراحی یک فیچر «فاصله از سطح» درست به
+بررسی بیشتری نیاز دارد و به همین دلیل فعلاً از این گزارش کنار گذاشته شده.
+
 دقیقاً مثل analyze_future_price_prediction.py، فقط اولین تیکِ هر «تست»
 (نه همهٔ تیک‌های یک توقفِ واحد) شمرده می‌شود تا نمونه‌ها واقعاً مستقل
 باشند - همان فاصلهٔ حداقلیِ config.LEVEL_STRATEGY_MIN_CLICK_INTERVAL_SECONDS.
@@ -37,6 +62,7 @@ from __future__ import annotations
 import bisect
 import math
 import sqlite3
+import statistics
 from collections import defaultdict
 
 import pandas as pd
@@ -143,14 +169,40 @@ def _detect_level_tests(symbol: str, timestamps: list[float], prices: list[float
             level_type = "resistance"
             level_price = (level_context["level_strategy_near_high_position"] * current_candle.range
                             + current_candle.low)
+            gap = near_high_gap
         else:
             level_type = "support"
             level_price = (level_context["level_strategy_near_low_position"] * current_candle.range
                             + current_candle.low)
+            gap = near_low_gap
 
-        tests.append({"index": i, "level_type": level_type, "level_price": level_price})
+        tests.append({"index": i, "level_type": level_type, "level_price": level_price, "gap": gap})
 
     return tests
+
+
+def _velocity_pct_at(timestamps: list[float], prices: list[float], i: int) -> float | None:
+    """درصد تغییر قیمت بین دو تیک آخر (تا شاخص i)، تقسیم بر تغییر زمان - دقیقاً مثل TickBuffer.get_velocity_pct."""
+    if i < 1:
+        return None
+    dt = timestamps[i] - timestamps[i - 1]
+    if dt <= 0 or prices[i - 1] == 0:
+        return None
+    return (prices[i] - prices[i - 1]) / prices[i - 1] / dt
+
+
+def _acceleration_pct_at(timestamps: list[float], prices: list[float], i: int) -> float | None:
+    """تغییر سرعتِ درصدی بین دو مقدار آخر، تقسیم بر تغییر زمان - دقیقاً مثل TickBuffer.get_acceleration_pct."""
+    if i < 2:
+        return None
+    v_curr = _velocity_pct_at(timestamps, prices, i)
+    v_prev = _velocity_pct_at(timestamps, prices, i - 1)
+    if v_curr is None or v_prev is None:
+        return None
+    dt = timestamps[i] - timestamps[i - 1]
+    if dt <= 0:
+        return None
+    return (v_curr - v_prev) / dt
 
 
 def _outcome_for_test(timestamps: list[float], prices: list[float], test: dict) -> str | None:
@@ -247,6 +299,42 @@ def _report_approach_patterns(all_tests: list[tuple[dict, str]], directions_by_t
               f"(انتظار تصادفی حدود {len(rows) * 0.05:.1f} مورد).")
 
 
+def _report_continuous_split(
+    all_tests: list[tuple[dict, str]], continuous_features: dict, feature_key: str, label: str
+) -> None:
+    """
+    یک فیچر پیوسته (فاصله/سرعت/شتاب) را با میانه به دو گروه تقسیم می‌کند و
+    نرخ عبور هر گروه را با z-test مقایسه می‌کند - همان روشی که
+    analyze_level_strategy.py برای فیچرهای پیوسته استفاده می‌کند.
+    """
+    print(f"\n--- {label} ---")
+    values: list[tuple[float, str]] = []
+    for test, outcome in all_tests:
+        v = continuous_features.get(id(test), {}).get(feature_key)
+        if v is not None:
+            values.append((v, outcome))
+
+    if len(values) < MIN_N_TO_REPORT * 2:
+        print(f"  نمونهٔ کافی نیست (n={len(values)}).")
+        return
+
+    median = statistics.median(v for v, _ in values)
+    above = [o for v, o in values if v > median]
+    below = [o for v, o in values if v <= median]
+    if len(above) < MIN_N_TO_REPORT or len(below) < MIN_N_TO_REPORT:
+        print(f"  بعد از تفکیک با میانه، نمونهٔ کافی نیست (بالای میانه={len(above)}, پایین/مساوی میانه={len(below)}).")
+        return
+
+    above_breakout = sum(1 for o in above if o == "breakout")
+    below_breakout = sum(1 for o in below if o == "breakout")
+    z, pval = _two_proportion_z_test(above_breakout, len(above), below_breakout, len(below))
+    flag = " ⚠️ معنادار (p<0.05)" if pval < 0.05 else ""
+    print(f"  میانه: {median:.6g}  |  n کل: {len(values)}")
+    print(f"  بالای میانه: n={len(above)}, نرخ عبور={above_breakout / len(above):.1%}")
+    print(f"  پایین/مساوی میانه: n={len(below)}, نرخ عبور={below_breakout / len(below):.1%}")
+    print(f"  z={z:+.2f}, p={pval:.3f}{flag}")
+
+
 def main() -> None:
     df = _load_ticks_with_price()
     if df.empty:
@@ -258,6 +346,7 @@ def main() -> None:
 
     all_tests: list[tuple[dict, str]] = []
     directions_by_test_key: dict = {}
+    continuous_features: dict = {}
 
     for _, group in df.groupby("segment_id"):
         if len(group) < 5:
@@ -274,6 +363,10 @@ def main() -> None:
                 continue
             all_tests.append((test, outcome))
             directions_by_test_key[id(test)] = directions[:test["index"]]
+            continuous_features[id(test)] = {
+                "velocity_pct": _velocity_pct_at(timestamps, prices, test["index"]),
+                "acceleration_pct": _acceleration_pct_at(timestamps, prices, test["index"]),
+            }
 
     print(f"تعداد کل ردیف قابل‌استفاده (با price): {len(df)}  |  تعداد نماد: {df['symbol'].nunique()}  |  "
           f"تعداد تست‌های سطحِ مستقل با نتیجهٔ مشخص: {len(all_tests)}")
@@ -285,11 +378,19 @@ def main() -> None:
     _report_base_rates(all_tests)
     _report_approach_patterns(all_tests, directions_by_test_key)
 
+    print(f"\n{'=' * 70}\nآیا سرعت یا شتاب لحظهٔ تست، عبور/بازگشت را پیش‌بینی می‌کند؟\n{'=' * 70}")
+    _report_continuous_split(all_tests, continuous_features, "velocity_pct",
+                              "سرعتِ درصدیِ لحظهٔ تست (Momentum)")
+    _report_continuous_split(all_tests, continuous_features, "acceleration_pct",
+                              "شتابِ درصدیِ لحظهٔ تست (Acceleration)")
+
     print(f"\n{'=' * 70}")
     print("جمع‌بندی: نرخ پایه نشان می‌دهد آیا خودِ سطوح حمایت/مقاومت به‌طور کلی")
-    print("بیشتر باعث بازگشت می‌شوند یا عبور. بخش دوم نشان می‌دهد آیا از روی")
-    print(f"سرعت/جهتِ نزدیک‌شدنِ قیمت (چند تیکِ آخر قبل از رسیدن به سطح) می‌شود")
-    print("حدس زد کدام‌یک رخ خواهد داد.")
+    print("بیشتر باعث بازگشت می‌شوند یا عبور. بخش‌های بعدی نشان می‌دهند آیا از")
+    print("روی جهتِ چند تیکِ آخر، سرعت، یا شتاب لحظهٔ تست می‌شود حدس زد کدام‌یک")
+    print("(عبور یا بازگشت) رخ خواهد داد. حجم معامله در این بررسی نیست چون در")
+    print("دادهٔ این بروکر اصلاً ثبت نمی‌شود. فاصلهٔ دقیق از سطح (gap) عمداً از")
+    print("این گزارش حذف شده - نگاه کنید به توضیح بالای فایل.")
     print("=" * 70)
 
 
